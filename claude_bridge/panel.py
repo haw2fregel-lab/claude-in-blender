@@ -178,6 +178,35 @@ def _find_claude(bridge):
     return str(fallback) if fallback.exists() else None
 
 
+def _parse_stream_json(stdout):
+    """stream-json 出力（1行1イベント）から (result イベント, 最終コールの usage) を返す。
+
+    usage に result イベントのものを使わないこと——result の usage は全 API コールの
+    合算で、「この送信のコスト」として誤読される（ツールを使う依頼はコールが複数回
+    走るため、線のコンテキスト量を超えた数字が出る。実測: 27万の線で再利用55万）。
+    パネルに出すのは最終コール単体 = 1コールの請求 ≒ この線の今のコンテキスト量。
+    """
+    result_event = None
+    last_usage = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "assistant":
+            usage = (event.get("message") or {}).get("usage")
+            if usage:
+                last_usage = usage
+        elif event.get("type") == "result":
+            result_event = event
+    return result_event, last_usage
+
+
 def _run_claude(full_prompt):
     """ワーカースレッド本体。ここでは bpy を一切触らない。
 
@@ -226,7 +255,9 @@ def _run_claude(full_prompt):
         # 依頼文はプロセス一覧に出さないため stdin で渡す。
         "-p",
         "--allowedTools", "mcp__claude-in-blender__*",
-        "--output-format", "json",
+        # stream-json はコールごとの usage が取れる唯一の形式（-p では --verbose 必須）。
+        # json 一発だと usage が全コール合算になり、送信コストとして読めない。
+        "--output-format", "stream-json", "--verbose",
     ]
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -238,18 +269,17 @@ def _run_claude(full_prompt):
             timeout=300,
             creationflags=flags,
         )
-        try:
-            d = json.loads(p.stdout)
+        d, last_usage = _parse_stream_json(p.stdout)
+        if d is not None:
             text = str(d.get("result") or d.get("error") or p.stdout[:500])
             err = bool(d.get("is_error")) or p.returncode != 0
-            u = d.get("usage") or {}
             usage = ""
-            if u:
+            if last_usage:
                 # キャッシュ再利用=ほぼ無料で読めた分 / 新規=今回課金枠を食った分。
-                # 「効いてるか」を送信のたびに見えるようにする（見えないコストを見える化）。
+                # 最終コール単体なので、二つの合計 ≒ この線の今のコンテキスト量。
                 usage = "キャッシュ再利用 {:,} / 新規 {:,}".format(
-                    u.get("cache_read_input_tokens") or 0,
-                    u.get("cache_creation_input_tokens") or 0)
+                    last_usage.get("cache_read_input_tokens") or 0,
+                    last_usage.get("cache_creation_input_tokens") or 0)
             new_sid = d.get("session_id")
             is_valid_session_id = (
                 isinstance(new_sid, str)
@@ -266,7 +296,8 @@ def _run_claude(full_prompt):
                         text += "\n(別プロジェクトに切り替わったため、この会話の接続先は保存しなかった)"
             if err and p.stderr:
                 text += "\n" + p.stderr[:300]
-        except json.JSONDecodeError:
+        else:
+            # result イベントが来ていない = stream-json として読めない応答
             text = (p.stdout or p.stderr or "空応答")[:500]
             err = p.returncode != 0
             usage = ""

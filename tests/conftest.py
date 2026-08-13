@@ -16,7 +16,7 @@ MCP_SERVER = ROOT / "mcp_server"
 if str(MCP_SERVER) not in sys.path:
     sys.path.insert(0, str(MCP_SERVER))
 
-for module_name in ("bpy", "bmesh", "bpy_extras", "mathutils"):
+for module_name in ("bpy", "bmesh", "bpy_extras", "mathutils", "blf"):
     sys.modules.setdefault(module_name, MagicMock(name=module_name))
 
 bridge_package = types.ModuleType("claude_bridge")
