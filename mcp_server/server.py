@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -11,6 +12,7 @@ from mcp.types import ImageContent, TextContent
 from bridge import BlenderBridge
 
 _SCRATCH_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender", "scratch")
+_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 
 mcp = FastMCP(
     "claude-in-blender",
@@ -91,6 +93,43 @@ def _resolve_scratch_file(path: str) -> Path:
     except (OSError, TypeError, ValueError):
         raise _scratch_file_error(path) from None
     return scratch_file
+
+
+def _project_slug() -> str:
+    return re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd()))
+
+
+def _message_text(record: dict) -> str:
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        block["text"]
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+    )
+
+
+def _session_timestamp(value: object) -> str:
+    if not isinstance(value, str):
+        return "--/-- --:--"
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%m/%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return "--/-- --:--"
+
+
+def _session_excerpt(text: str, query_word: str) -> str:
+    match_index = text.lower().find(query_word)
+    start = max(match_index - 80, 0)
+    end = min(match_index + len(query_word) + 80, len(text))
+    excerpt = text[start:end].replace("\r", " ").replace("\n", " ")
+    return f"{'...' if start else ''}{excerpt}{'...' if end < len(text) else ''}"
 
 
 @mcp.tool()
@@ -308,6 +347,78 @@ def get_doc(identifier: str) -> str:
     if not result.get("ok"):
         raise _bridge_error(result)
     return _fmt(result)
+
+
+@mcp.tool()
+def search_session_history(query: str, max_results: int = 8) -> str:
+    """Search previous Claude Code session transcripts for this project.
+
+    Args:
+        query: Space-separated terms that all must appear in a message.
+        max_results: Maximum number of matching excerpts to return.
+    """
+    no_match = f"No match for: {query}"
+    if not isinstance(query, str):
+        return no_match
+    query_words = query.lower().split()
+    if not query_words:
+        return no_match
+    try:
+        result_limit = min(max(int(max_results), 1), 20)
+    except (OverflowError, TypeError, ValueError):
+        result_limit = 8
+
+    try:
+        project_dir = _PROJECTS_ROOT / _project_slug()
+        if not project_dir.is_dir():
+            return no_match
+
+        session_files = []
+        for path in project_dir.glob("*.jsonl"):
+            try:
+                stat_result = path.stat()
+            except OSError:
+                continue
+            # 10MB 超は候補に入れない（「新しい10件」の枠を skip で食わないよう、読む前に絞る）
+            if stat_result.st_size > 10 * 1024 * 1024:
+                continue
+            session_files.append((stat_result.st_mtime, path))
+
+        excerpts = []
+        excerpt_length = 0
+        for _, path in sorted(session_files, key=lambda item: item[0], reverse=True)[:10]:
+            try:
+                with path.open(encoding="utf-8") as f:
+                    lines = f.readlines()
+            except (OSError, UnicodeError):
+                continue
+
+            for line in reversed(lines):
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(record, dict) or record.get("type") not in {"user", "assistant"}:
+                    continue
+                if record.get("isMeta"):
+                    continue
+                text = _message_text(record)
+                if not text or not all(word in text.lower() for word in query_words):
+                    continue
+
+                excerpt = _session_excerpt(text, query_words[0])
+                formatted = f"[{path.stem[:8]} {_session_timestamp(record.get('timestamp'))} {record['type']}] {excerpt}"
+                if excerpt_length + len(formatted) + (1 if excerpts else 0) > 4000:
+                    excerpts.append("... (truncated)")
+                    return "\n".join(excerpts)
+                excerpts.append(formatted)
+                excerpt_length += len(formatted) + (1 if len(excerpts) > 1 else 0)
+                if len(excerpts) >= result_limit:
+                    return "\n".join(excerpts)
+    except Exception:
+        return no_match
+
+    return "\n".join(excerpts) if excerpts else no_match
 
 
 if __name__ == "__main__":

@@ -242,6 +242,14 @@ def _run_claude(full_prompt):
             d = json.loads(p.stdout)
             text = str(d.get("result") or d.get("error") or p.stdout[:500])
             err = bool(d.get("is_error")) or p.returncode != 0
+            u = d.get("usage") or {}
+            usage = ""
+            if u:
+                # キャッシュ再利用=ほぼ無料で読めた分 / 新規=今回課金枠を食った分。
+                # 「効いてるか」を送信のたびに見えるようにする（見えないコストを見える化）。
+                usage = "キャッシュ再利用 {:,} / 新規 {:,}".format(
+                    u.get("cache_read_input_tokens") or 0,
+                    u.get("cache_creation_input_tokens") or 0)
             new_sid = d.get("session_id")
             is_valid_session_id = (
                 isinstance(new_sid, str)
@@ -261,7 +269,8 @@ def _run_claude(full_prompt):
         except json.JSONDecodeError:
             text = (p.stdout or p.stderr or "空応答")[:500]
             err = p.returncode != 0
-        _result_box = {"ready": True, "text": text, "error": err}
+            usage = ""
+        _result_box = {"ready": True, "text": text, "error": err, "usage": usage}
     except subprocess.TimeoutExpired:
         _result_box = {"ready": True, "text": "タイムアウト (300秒)", "error": True}
     except Exception as e:  # noqa: BLE001 - 試作: 何が起きても箱に入れて UI に見せる
@@ -275,6 +284,7 @@ def _poll_result():
     if _result_box.get("ready"):
         wm.claude_bridge_status = "ERROR" if _result_box.get("error") else "DONE"
         wm.claude_bridge_reply = _result_box.get("text", "")
+        wm.claude_bridge_usage = _result_box.get("usage", "")
         _result_box = {"ready": False, "text": "", "error": False}
         _tag_redraw()
         return None  # timer 終了
@@ -448,6 +458,8 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             layout.label(text="完了", icon="CHECKMARK")
         elif status == "ERROR":
             layout.label(text="エラー", icon="ERROR")
+        if status in ("DONE", "ERROR") and wm.claude_bridge_usage:
+            layout.label(text=wm.claude_bridge_usage)
         reply = wm.claude_bridge_reply
         if reply:
             # パネル実幅から box の余白・スクロールバーぶんを引いた幅に、実測で収める
@@ -477,7 +489,8 @@ classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_OT_clear_log,
            CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
 
 _WM_PROPS = ("claude_bridge_prompt", "claude_bridge_status",
-             "claude_bridge_reply", "claude_bridge_collapsed") + tuple(
+             "claude_bridge_reply", "claude_bridge_usage",
+             "claude_bridge_collapsed") + tuple(
     prop for prop, _label, _text in _CTX_TOGGLES)
 
 
@@ -486,6 +499,7 @@ def register():
         name="依頼", description="Claude への依頼", default="")
     bpy.types.WindowManager.claude_bridge_status = bpy.props.StringProperty(default="IDLE")
     bpy.types.WindowManager.claude_bridge_reply = bpy.props.StringProperty(default="")
+    bpy.types.WindowManager.claude_bridge_usage = bpy.props.StringProperty(default="")
     bpy.types.WindowManager.claude_bridge_collapsed = bpy.props.BoolProperty(
         name="畳む", description="返事の表示を先頭8行に畳む", default=False)
     for prop, label, text in _CTX_TOGGLES:
