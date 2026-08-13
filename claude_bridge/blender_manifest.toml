@@ -1,12 +1,12 @@
 schema_version = "1.0.0"
 
 id = "claude_bridge"
-version = "1.6.0"
+version = "1.6.1"
 name = "Claude Bridge"
 tagline = "Send requests to your Claude Code session from inside Blender"
 maintainer = "haw2fregel"
 type = "add-on"
-website = "https://github.com/haw2fregel/claude-in-blender"
+website = "https://github.com/haw2fregel-lab/claude-in-blender"
 tags = ["Development", "User Interface"]
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
