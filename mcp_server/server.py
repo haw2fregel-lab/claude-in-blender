@@ -1,11 +1,14 @@
 import base64
 import json
 import os
+import tempfile
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 
 from bridge import BlenderBridge
+
+_SCRATCH_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender", "scratch")
 
 mcp = FastMCP(
     "claude-in-blender",
@@ -15,6 +18,11 @@ mcp = FastMCP(
         " to save tokens. For example, creating an object,"
         " setting its material, and adjusting lighting should"
         " be one script, not three separate calls.\n\n"
+        "For anything longer than a few lines, write the script"
+        f" to a .py file under {_SCRATCH_DIR}"
+        " and run it with execute_file. Fixing the file with a"
+        " small edit and re-running is much cheaper than"
+        " resending the whole script through execute_code.\n\n"
         "Use get_doc to look up API names before writing code"
         " to avoid retries from wrong function names or"
         " parameters.\n\n"
@@ -24,7 +32,20 @@ mcp = FastMCP(
         " changed (created object name, count, etc.)."
         " Only use get_viewport_screenshot or capture_after"
         " when you need to check visual appearance"
-        " (lighting, materials, composition)."
+        " (lighting, materials, composition).\n\n"
+        "Write execute_code scripts as straight-line throwaway"
+        " code: the goal is already decided, so no defensive"
+        " if-branches, no comments, no helper abstractions."
+        " If it fails, the error comes back — just fix and"
+        " retry. (Detailed result values for verification are"
+        " still fine.)\n\n"
+        "When the current state is uncertain (selection,"
+        " dimensions, existing names), do not hedge with"
+        " if-branches. Split the work: first send a read-only"
+        " query script (or use get_selection / get_scene_info /"
+        " get_object_info) to learn the state, then write the"
+        " straight-line action script against the confirmed"
+        " conditions."
     ),
 )
 bridge = BlenderBridge()
@@ -82,15 +103,14 @@ def get_scene_info() -> str:
     return _fmt(result)
 
 
-@mcp.tool()
-def execute_code(code: str, capture_after: bool = False) -> list:
-    """Execute Python code inside Blender (bpy available).
-    Set a variable called 'result' to return data back.
-
-    Args:
-        code: Python code to execute in Blender's context
-        capture_after: If True, capture a viewport screenshot after execution
-    """
+def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") -> list:
+    # 構文エラーは Blender まで運ばず手前で弾く（行番号はファイルの実行と一致する）
+    try:
+        compile(code, filename, "exec")
+    except SyntaxError as e:
+        raise RuntimeError(
+            f"SyntaxError: {e.msg} ({filename}, line {e.lineno}): {(e.text or '').strip()}"
+        )
     result = bridge.send("execute_code", {"code": code})
     if not result.get("ok"):
         raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
@@ -132,6 +152,42 @@ def execute_code(code: str, capture_after: bool = False) -> list:
             mimeType="image/png",
         ),
     ]
+
+
+@mcp.tool()
+def execute_code(code: str, capture_after: bool = False) -> list:
+    """Execute Python code inside Blender (bpy available).
+    Set a variable called 'result' to return data back.
+
+    For anything longer than a few lines, prefer execute_file.
+
+    Args:
+        code: Python code to execute in Blender's context
+        capture_after: If True, capture a viewport screenshot after execution
+    """
+    return _run_code(code, capture_after)
+
+
+@mcp.tool()
+def execute_file(path: str, capture_after: bool = False) -> list:
+    """Execute a Python file inside Blender (bpy available).
+    Set a variable called 'result' in the file to return data back.
+
+    Prefer this over execute_code for longer scripts: write the file,
+    run it, fix it with small edits, re-run — much cheaper than
+    resending the whole script. Syntax errors are caught locally
+    (with file line numbers) before reaching Blender.
+
+    Args:
+        path: Absolute path to a Python (.py) file
+        capture_after: If True, capture a viewport screenshot after execution
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            code = f.read()
+    except OSError as e:
+        raise RuntimeError(f"Cannot read file: {e}")
+    return _run_code(code, capture_after, filename=path)
 
 
 @mcp.tool()

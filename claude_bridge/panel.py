@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import unicodedata
 from datetime import datetime
@@ -200,9 +201,23 @@ def _run_claude(full_prompt):
         mcp_config = Path(bridge["cwd"]) / ".mcp.json"
         if mcp_config.exists():
             cmd += ["--strict-mcp-config", "--mcp-config", str(mcp_config)]
+    # 分身が触れるファイルは専用の砂場（scratch）だけ。長いスクリプトは
+    # ここに .py で書いて execute_file で回す（修正が差分編集で済み、
+    # コード全文の再出力コストを払わない）。案内は MCP サーバーの
+    # instructions が同じパスを埋め込んで行う。
+    scratch = Path(tempfile.gettempdir()) / "claude-in-blender" / "scratch"
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    allowed = ",".join((
+        "mcp__claude-in-blender__*",
+        f"Write({scratch.as_posix()}/**)",
+        f"Edit({scratch.as_posix()}/**)",
+    ))
     cmd += [
         "-p", full_prompt,
-        "--allowedTools", "mcp__claude-in-blender__*",
+        "--allowedTools", allowed,
         "--output-format", "json",
     ]
     try:
