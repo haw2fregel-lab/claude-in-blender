@@ -330,10 +330,26 @@ def _tag_redraw():
                 area.tag_redraw()
 
 
+# 送信文の先頭に付く出所ラベル。役目はこの一つだけで、ユーザーの依頼文へ
+# 見えない指示を追記しない（作法系の指示は MCP サーバーの instructions が持ち、
+# あちらはリポで公開された仕様）。何が送られるかはユーザーから全部見える。
+_SEND_LABEL = "[Blender から送信]"
+
+
+def _build_prompt(prompt, directives=()):
+    """送信文 = 出所ラベル + チェック済みトグルの指示 + ユーザーの文。それだけ。"""
+    head = _SEND_LABEL
+    if directives:
+        head += "\n" + "\n".join("- " + d for d in directives)
+    return head + "\n\n" + prompt
+
+
 class CLAUDE_OT_send(bpy.types.Operator):
     bl_idname = "claude.send_request"
     bl_label = "Claude に送る"
-    bl_description = "依頼を Claude Code のセッションに送る"
+    bl_description = ("依頼を Claude Code のセッションに送る。"
+                      "送信文に付くのは出所ラベル「[Blender から送信]」と"
+                      "チェックしたコンテキスト指示だけ（見えない追記はしない）")
 
     def execute(self, context):
         global _worker
@@ -347,13 +363,7 @@ class CLAUDE_OT_send(bpy.types.Operator):
             return {"CANCELLED"}
         # プロンプト組み立てはメインスレッドで済ませ、スレッドへは完成文字列だけ渡す
         directives = [text for prop, _label, text in _CTX_TOGGLES if getattr(wm, prop)]
-        head = (
-            "Blender 側のパネルからの依頼です。claude-in-blender の MCP ツールを使って"
-            "Blender を直接操作して実行してください。完了したら結果を3行以内で報告してください。"
-        )
-        if directives:
-            head += "\n" + "\n".join("- " + d for d in directives)
-        full_prompt = head + "\n\n依頼: " + prompt
+        full_prompt = _build_prompt(prompt, directives)
         wm.claude_bridge_status = "WORKING"
         wm.claude_bridge_reply = ""
         _worker = threading.Thread(target=_run_claude, args=(full_prompt,), daemon=True)
