@@ -194,6 +194,12 @@ def _run_claude(full_prompt):
     cmd = [claude]
     if bridge.get("session_id"):
         cmd += ["-r", bridge["session_id"]]
+    # MCP はこのリポの1台だけに絞る。グローバル設定の MCP まで毎回 spawn すると
+    # 起動が数秒重くなる（実測で 6.1s → 4.2s）。
+    if bridge.get("cwd"):
+        mcp_config = Path(bridge["cwd"]) / ".mcp.json"
+        if mcp_config.exists():
+            cmd += ["--strict-mcp-config", "--mcp-config", str(mcp_config)]
     cmd += [
         "-p", full_prompt,
         "--allowedTools", "mcp__claude-in-blender__*",
