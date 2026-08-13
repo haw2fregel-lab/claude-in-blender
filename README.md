@@ -4,7 +4,7 @@
 
 Blender の N パネルに小さな窓を開き、いま使っている Claude Code のセッションにそのまま依頼を送る逆方向連携です。頼んだ作業は Claude が同梱の MCP サーバー経由で Blender を直接操作して実行します——デスクトップでの会話の続きのまま、Blender から出ずに。
 
-> 開発中（試作 v1.8.0）。動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows
+> 開発中（試作 v1.8.1）。動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows
 
 ## 何ができる
 

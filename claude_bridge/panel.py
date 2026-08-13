@@ -317,7 +317,8 @@ class CLAUDE_OT_send(bpy.types.Operator):
         wm.claude_bridge_reply = ""
         _worker = threading.Thread(target=_run_claude, args=(full_prompt,), daemon=True)
         _worker.start()
-        bpy.app.timers.register(_poll_result, first_interval=0.5)
+        # persistent=True: 応答待ち中にファイルを開いても poll を生かす
+        bpy.app.timers.register(_poll_result, first_interval=0.5, persistent=True)
         return {"FINISHED"}
 
 

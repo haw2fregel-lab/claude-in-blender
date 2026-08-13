@@ -645,7 +645,9 @@ def start_server(port=_DEFAULT_PORT):
     _running = True
     _server_thread = threading.Thread(target=_server_loop, daemon=True)
     _server_thread.start()
-    bpy.app.timers.register(_process_pending, first_interval=0.1)
+    # persistent=True: 既定ではファイルロードで timer が消える。起動時は
+    # register → startup ファイル読込の順なので、これが無いと橋が起動直後に死ぬ
+    bpy.app.timers.register(_process_pending, first_interval=0.1, persistent=True)
 
     status = "execute_code=ON" if _execute_code_enabled else "execute_code=OFF"
     print(f"[Claude Bridge] Bridge started on {_HOST}:{_port} ({status})")
