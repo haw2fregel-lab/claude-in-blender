@@ -76,6 +76,25 @@ def _err(message, tb=None, start=None):
     return {"ok": False, "error": error, "elapsed_ms": elapsed}
 
 
+# ── Exec log ──────────────────────────────────────────────
+
+_LOG_NAME = "claude_bridge_log"
+
+
+def _log_exec(text):
+    """execute_code の内容を Text データブロックとシステムコンソールに残す。
+
+    Text は Blender の Text エディタで claude_bridge_log を開くと読める
+    （.blend 保存にも含まれる）。ログ失敗で実行は止めない。
+    """
+    print(f"[Claude Bridge] {text}")
+    try:
+        log = bpy.data.texts.get(_LOG_NAME) or bpy.data.texts.new(_LOG_NAME)
+        log.write(text + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ── Exec timeout (sys.settrace) ───────────────────────────
 
 
@@ -133,16 +152,20 @@ def _cmd_execute_code(params):
     if not code.strip():
         return _err("Empty code", start=start)
 
+    _log_exec(f"\n# ==== {time.strftime('%H:%M:%S')} execute_code ====\n{code.rstrip()}")
+
     namespace = {"bpy": bpy, "__builtins__": __builtins__}
     old_trace = sys.gettrace()
     try:
         sys.settrace(_ExecTimeoutTracer(time.monotonic() + _EXEC_TIMEOUT_S))
         exec(code, namespace)
     except TimeoutError as e:
+        _log_exec(f"# -> TIMEOUT: {e}")
         return _err(str(e), start=start)
     except (SystemExit, KeyboardInterrupt):
         raise
     except BaseException as e:
+        _log_exec(f"# -> ERROR: {e}")
         return _err(str(e), tb=traceback.format_exc(), start=start)
     finally:
         sys.settrace(old_trace)
@@ -153,6 +176,7 @@ def _cmd_execute_code(params):
     except (TypeError, ValueError):
         result = str(result)
 
+    _log_exec(f"# -> result: {str(result)[:200]}")
     return _ok({"result": result}, start)
 
 
