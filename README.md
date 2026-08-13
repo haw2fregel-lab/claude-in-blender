@@ -20,7 +20,7 @@ Blender の N パネルに小さな窓を開き、いま使っている Claude C
 このリポジトリだけで完結する構成です。
 
 1. **Blender アドオン（`claude_bridge/`）** — N パネルの UI と、MCP からの操作を受ける TCP 受け口
-2. **MCP サーバー（`mcp_server/`）** — Claude Code に Blender 操作ツール 10 個（`execute_code`・`get_scene_info`・`get_doc` など）を提供
+2. **MCP サーバー（`mcp_server/`）** — Claude Code に Blender 操作ツール 11 個（`execute_code`・`get_scene_info`・`get_doc` など。過去セッションの発言を横断検索する `search_session_history` も提供。全履歴を運ばずに数百トークンで文脈を引ける）
 3. **あなたの Claude Code** — パネルからの依頼を受け、MCP ツールで Blender を操作
 
 - Claude Code にログイン済みなら、そのまま動きます。**追加の API キーは不要**
