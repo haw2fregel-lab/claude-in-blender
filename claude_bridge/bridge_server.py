@@ -5,7 +5,7 @@
 封筒 {"ok", "data"/"error", "elapsed_ms"} を1行で返す。
 ソケットは別スレッドが持ち、bpy を触るのはタイマー経由のメインスレッドだけ。
 
-公開 API: start_server() / stop_server() / is_running()
+公開 API: start_server() / stop_server() / is_running() / clear_exec_log()
 """
 
 import json
@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 
 import bpy
 
@@ -51,6 +52,12 @@ _server_socket = None
 _server_thread = None
 _session_token = None
 _execute_code_enabled = False
+_client_conns = set()
+_conns_lock = threading.Lock()
+# execute_code が「待ち行列に積まれてから実行完了するまで」立つ。_pending_lock で守る。
+# 「実行中か」ではなく「積む時に既に居るか」で判定しないと、timer が長く止まった間の
+# 再送が同じ batch に滑り込み、順に二重実行される（積む判定と投入は同じ lock 区間で行う）。
+_exec_busy = False
 _port = _DEFAULT_PORT
 
 _TMP_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender")
@@ -79,6 +86,7 @@ def _err(message, tb=None, start=None):
 # ── Exec log ──────────────────────────────────────────────
 
 _LOG_NAME = "claude_bridge_log"
+_MAX_LOG_LINES = 5000
 
 
 def _log_exec(text):
@@ -91,10 +99,21 @@ def _log_exec(text):
     try:
         log = bpy.data.texts.get(_LOG_NAME) or bpy.data.texts.new(_LOG_NAME)
         log.write(text + "\n")
+        if len(log.lines) > _MAX_LOG_LINES:
+            retained = log.as_string().splitlines()[-(_MAX_LOG_LINES // 2):]
+            log.clear()
+            log.write("# (older log truncated)\n" + "\n".join(retained) + "\n")
     except Exception:  # noqa: BLE001
         pass
 
 
+def clear_exec_log():
+    """実行ログを空にする。ログがなければ何もしない。"""
+    log = bpy.data.texts.get(_LOG_NAME)
+    if not log:
+        return False
+    log.clear()
+    return True
 # ── Exec timeout (sys.settrace) ───────────────────────────
 
 
@@ -149,24 +168,34 @@ def _cmd_execute_code(params):
         )
 
     code = params.get("code") or ""
+    filename = params.get("filename") or "<execute_code>"
     if not code.strip():
         return _err("Empty code", start=start)
 
-    _log_exec(f"\n# ==== {time.strftime('%H:%M:%S')} execute_code ====\n{code.rstrip()}")
+    request_id = params.get("request_id")
+    request_label = request_id[:8] if isinstance(request_id, str) else "unknown"
+    _log_exec(
+        f"\n# ==== {time.strftime('%H:%M:%S')} execute_code "
+        f"[req {request_label}] ====\n{code.rstrip()}"
+    )
 
-    namespace = {"bpy": bpy, "__builtins__": __builtins__}
+    namespace = {"bpy": bpy, "__builtins__": __builtins__, "__name__": "__main__"}
+    if not filename.startswith("<"):
+        namespace["__file__"] = filename
     old_trace = sys.gettrace()
     try:
         sys.settrace(_ExecTimeoutTracer(time.monotonic() + _EXEC_TIMEOUT_S))
-        exec(code, namespace)
+        exec(compile(code, filename, "exec"), namespace)
     except TimeoutError as e:
         _log_exec(f"# -> TIMEOUT: {e}")
         return _err(str(e), start=start)
-    except (SystemExit, KeyboardInterrupt):
-        raise
     except BaseException as e:
         _log_exec(f"# -> ERROR: {e}")
-        return _err(str(e), tb=traceback.format_exc(), start=start)
+        return _err(
+            f"{type(e).__name__}: {e}",
+            tb=traceback.format_exc(),
+            start=start,
+        )
     finally:
         sys.settrace(old_trace)
 
@@ -209,7 +238,7 @@ def _cmd_get_viewport_screenshot(_params):
     if not target_area:
         return _err("No 3D Viewport found", start=start)
 
-    tmp_path = os.path.join(_TMP_DIR, "viewport.png")
+    tmp_path = os.path.join(_TMP_DIR, f"viewport-{uuid.uuid4().hex[:8]}.png")
     os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
 
     bpy.context.view_layer.depsgraph.update()
@@ -342,8 +371,6 @@ def _handle_command(command, params):
         return _err(f"Unknown command: {command}", start=start)
     try:
         return handler(params)
-    except (SystemExit, KeyboardInterrupt):
-        raise
     except BaseException as e:
         return _err(str(e), tb=traceback.format_exc(), start=start)
 
@@ -352,6 +379,7 @@ def _handle_command(command, params):
 
 
 def _process_pending():
+    global _exec_busy
     if not _running:
         return None
 
@@ -361,17 +389,31 @@ def _process_pending():
 
     for raw_json, event, holder in batch:
         try:
+            # raw_json は _client_handler が peek 済み（不正 JSON はここへ来ない）
             msg = json.loads(raw_json)
             command = msg.get("command", "")
             params = msg.get("params", {})
-            if holder["result"] is None:
+            # request_id はプロトコル top-level。ログ用に params へも渡す
+            if isinstance(params, dict) and msg.get("request_id") is not None:
+                params.setdefault("request_id", msg["request_id"])
+            if command == "execute_code":
+                # 実行してもしなくても busy は戻す——holder timeout 済みで
+                # スキップされた場合に立ちっぱなしになると、以後の execute が
+                # 全部 reject され続ける
+                try:
+                    if holder["result"] is None:
+                        holder["result"] = _handle_command(command, params)
+                finally:
+                    with _pending_lock:
+                        _exec_busy = False
+            elif holder["result"] is None:
                 holder["result"] = _handle_command(command, params)
+            request_id = msg.get("request_id")
+            if request_id is not None and holder["result"] is not None:
+                holder["result"]["request_id"] = request_id
         except json.JSONDecodeError as e:
             if holder["result"] is None:
                 holder["result"] = _err(f"Invalid JSON: {e}", start=time.monotonic())
-        except (SystemExit, KeyboardInterrupt):
-            event.set()
-            raise
         except BaseException as e:
             if holder["result"] is None:
                 holder["result"] = _err(
@@ -387,6 +429,7 @@ def _process_pending():
 
 
 def _client_handler(conn, addr):
+    global _exec_busy
     try:
         conn.settimeout(30)
         buffer = b""
@@ -418,29 +461,49 @@ def _client_handler(conn, addr):
                     conn.sendall(_encode_response(resp))
                     continue
 
-                if _session_token:
-                    try:
-                        peek = json.loads(raw_json)
-                        if peek.get("token") != _session_token:
-                            resp = _err("Invalid session token", start=time.monotonic())
-                            conn.sendall(_encode_response(resp))
-                            continue
-                    except json.JSONDecodeError:
-                        resp = _err("Invalid JSON", start=time.monotonic())
-                        conn.sendall(_encode_response(resp))
-                        continue
-
+                try:
+                    peek = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    resp = _err("Invalid JSON", start=time.monotonic())
+                    conn.sendall(_encode_response(resp))
+                    continue
+                if _session_token and peek.get("token") != _session_token:
+                    resp = _err("Invalid session token", start=time.monotonic())
+                    conn.sendall(_encode_response(resp))
+                    continue
+                request_id = peek.get("request_id")
                 holder = {"result": None}
                 event = threading.Event()
 
-                with _pending_lock:
-                    _pending.append((raw_json, event, holder))
+                if peek.get("command") == "execute_code":
+                    # 判定と投入を同じ lock 区間で行う（積まれ待ちの重複も弾く）
+                    with _pending_lock:
+                        rejected = _exec_busy
+                        if not rejected:
+                            _exec_busy = True
+                            _pending.append((raw_json, event, holder))
+                    if rejected:
+                        resp = _err(
+                            "A previous execute is still running in Blender — outcome "
+                            "unknown. Check scene state (get_scene_info / get_object_info) "
+                            "before retrying.",
+                            start=time.monotonic(),
+                        )
+                        if request_id is not None:
+                            resp["request_id"] = request_id
+                        conn.sendall(_encode_response(resp))
+                        continue
+                else:
+                    with _pending_lock:
+                        _pending.append((raw_json, event, holder))
 
                 if not event.wait(timeout=_HOLDER_TIMEOUT_S):
                     holder["result"] = _err(
                         f"Timed out waiting for main thread ({_HOLDER_TIMEOUT_S}s)",
                         start=time.monotonic(),
                     )
+                    if request_id is not None:
+                        holder["result"]["request_id"] = request_id
 
                 try:
                     resp_bytes = _encode_response(holder["result"])
@@ -457,7 +520,7 @@ def _client_handler(conn, addr):
                         # UTF-8 の途中で切れないよう decode で戻す
                         truncated_str = truncated.decode("utf-8", errors="ignore")
                         result["data"] = {
-                            "truncated_output": truncated_str,
+                            "result": truncated_str,
                             "output_truncated": True,
                             "original_bytes": len(resp_bytes),
                         }
@@ -478,6 +541,26 @@ def _client_handler(conn, addr):
             conn.close()
         except OSError:
             pass
+        with _conns_lock:
+            _client_conns.discard(conn)
+
+def _remove_own_token_file():
+    try:
+        with open(_TOKEN_FILE, encoding="utf-8") as f:
+            if f.read().strip() == _session_token:
+                os.remove(_TOKEN_FILE)
+    except OSError:
+        pass
+
+
+def _clean_viewport_screenshots():
+    try:
+        for name in os.listdir(_TMP_DIR):
+            if name.startswith("viewport-") and name.endswith(".png"):
+                os.remove(os.path.join(_TMP_DIR, name))
+    except OSError:
+        pass
+
 
 
 def _encode_response(result):
@@ -498,11 +581,25 @@ def _server_loop():
         _server_socket.settimeout(1.0)
         _server_socket.bind((_HOST, _port))
         _server_socket.listen(_LISTEN_BACKLOG)
+        try:
+            os.makedirs(_TMP_DIR, exist_ok=True)
+            if sys.platform != "win32":
+                os.chmod(_TMP_DIR, 0o700)
+            fd = os.open(_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, _session_token.encode())
+            finally:
+                os.close(fd)
+        except OSError as e:
+            print(f"[Claude Bridge] Warning: could not write session token: {e}")
+        _clean_viewport_screenshots()
         print(f"[Claude Bridge] Listening on {_HOST}:{_port}")
 
         while _running:
             try:
                 conn, addr = _server_socket.accept()
+                with _conns_lock:
+                    _client_conns.add(conn)
                 threading.Thread(
                     target=_client_handler, args=(conn, addr), daemon=True
                 ).start()
@@ -521,10 +618,7 @@ def _server_loop():
             except OSError:
                 pass
             _server_socket = None
-        try:
-            os.remove(_TOKEN_FILE)
-        except OSError:
-            pass
+        _remove_own_token_file()
 
 
 # ── Public API ───────────────────────────────────────────
@@ -532,7 +626,7 @@ def _server_loop():
 
 def start_server(port=_DEFAULT_PORT):
     """受け口を起動する。すでに動いていれば何もしない。"""
-    global _running, _server_thread, _session_token, _execute_code_enabled, _port
+    global _running, _server_thread, _session_token, _execute_code_enabled, _port, _exec_busy
 
     if _running:
         print("[Claude Bridge] Already running")
@@ -543,19 +637,10 @@ def start_server(port=_DEFAULT_PORT):
 
     _port = port
     _execute_code_enabled = os.environ.get("CLAUDE_BRIDGE_EXECUTE", "1") != "0"
+    with _pending_lock:
+        _exec_busy = False
 
     _session_token = secrets.token_hex(16)
-    try:
-        os.makedirs(_TMP_DIR, exist_ok=True)
-        if sys.platform != "win32":
-            os.chmod(_TMP_DIR, 0o700)
-        fd = os.open(_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, _session_token.encode())
-        finally:
-            os.close(fd)
-    except OSError as e:
-        print(f"[Claude Bridge] Warning: could not write session token: {e}")
 
     _running = True
     _server_thread = threading.Thread(target=_server_loop, daemon=True)
@@ -568,10 +653,21 @@ def start_server(port=_DEFAULT_PORT):
 
 def stop_server():
     """受け口を止め、待ち行列・ソケット・トークンを片付ける。"""
-    global _running, _server_socket, _session_token
+    global _running, _server_socket, _session_token, _exec_busy
 
     was_running = _running
     _running = False
+    with _conns_lock:
+        for conn in _client_conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+        _client_conns.clear()
 
     if bpy.app.timers.is_registered(_process_pending):
         bpy.app.timers.unregister(_process_pending)
@@ -585,6 +681,7 @@ def stop_server():
                 holder["result"] = _err("Bridge shutting down", start=time.monotonic())
                 event.set()
         _pending.clear()
+        _exec_busy = False
 
     if _server_socket:
         try:
@@ -593,11 +690,8 @@ def stop_server():
             pass
         _server_socket = None
 
+    _remove_own_token_file()
     _session_token = None
-    try:
-        os.remove(_TOKEN_FILE)
-    except OSError:
-        pass
 
     if was_running:
         print("[Claude Bridge] Bridge stopped")

@@ -7,6 +7,8 @@ description: 開発中のアドオンを実機 Blender に反映するホット�
 `claude_bridge/` を編集した後、Blender を再起動せずに実機へ反映する。
 新規インストールは `blender-setup` へ。これは**上書き更新専用**。
 
+> 送信処理が走っている最中（パネルが「処理中」表示）の更新は避ける。
+
 ## 1. ビルド
 
 `python tools/build_extension.py` を実行。出力された zip のパスとバージョンを控える。
@@ -34,6 +36,12 @@ def _do_update():
             repo="user_default", enable_on_install=False, overwrite=True)
     except Exception:
         traceback.print_exc()
+        try:
+            bpy.ops.preferences.addon_enable(module="bl_ext.user_default.claude_bridge")
+        except Exception:
+            traceback.print_exc()
+        print("[claude-bridge-update] install failed — kept previous version")
+        return None
     for name in list(sys.modules):
         if name.startswith("bl_ext.user_default.claude_bridge"):
             del sys.modules[name]
@@ -53,6 +61,7 @@ result = "update scheduled"
 数秒おいて `get_bridge_status` を叩き、`addon_version` が
 manifest のバージョンと一致することを確認する。
 上がっていなければ、もう一度 2 を実行（それでもダメなら Blender 再起動が確実）。
+更新後に橋が死んで戻したい場合は、`git stash` 等で旧版の作業樹に戻して `python tools/build_extension.py` で旧 zip を作り、Blender の Install from Disk で入れ直す（このリポは git 管理なので旧版 zip はいつでも再現できる）。
 
 ## MCP が使えない場合
 

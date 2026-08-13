@@ -6,10 +6,10 @@ session_id は ~/.claude/blender-bridge-session.json (Claude Code 側が登録) 
 応答側の Claude は、このアドオンに内蔵の受け口 (bridge_server) 経由で Blender を操作する。
 """
 import json
+import os
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import unicodedata
 from datetime import datetime
@@ -92,14 +92,18 @@ def _load_bridge():
         return None
 
 
-def _save_session_id(session_id):
+def _save_session_id(session_id, expected_cwd=None):
     """bridge ファイルの session_id だけ書き換える（cwd 等の設定は保持）。"""
     data = _load_bridge() or {}
+    if expected_cwd is not None and data.get("cwd") != expected_cwd:
+        return False
     data["session_id"] = session_id
     data["registered_by"] = "claude_bridge panel"
+    temp_file = BRIDGE_FILE.with_suffix(".json.tmp")
     try:
-        BRIDGE_FILE.write_text(
+        temp_file.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp_file, BRIDGE_FILE)
         return True
     except OSError:
         return False
@@ -182,9 +186,27 @@ def _run_claude(full_prompt):
     """
     global _result_box
     bridge = _load_bridge()
-    if not bridge or not (bridge.get("session_id") or bridge.get("cwd")):
+    if not bridge:
         _result_box = {"ready": True, "error": True,
                        "text": "未セットアップ: Claude Code で /blender-setup を実行してね"}
+        return
+    cwd = bridge.get("cwd")
+    if not cwd:
+        _result_box = {
+            "ready": True,
+            "error": True,
+            "text": ".mcp.json が見つからない（セットアップ作業ディレクトリが未設定）。"
+                    "リポを移動した場合は Claude Code で /blender-setup をやり直してね",
+        }
+        return
+    mcp_config = Path(cwd) / ".mcp.json"
+    if not mcp_config.exists():
+        _result_box = {
+            "ready": True,
+            "error": True,
+            "text": f".mcp.json が見つからない（{mcp_config}）。"
+                    "リポを移動した場合は Claude Code で /blender-setup をやり直してね",
+        }
         return
     claude = _find_claude(bridge)
     if not claude:
@@ -195,35 +217,22 @@ def _run_claude(full_prompt):
     cmd = [claude]
     if bridge.get("session_id"):
         cmd += ["-r", bridge["session_id"]]
-    # MCP はこのリポの1台だけに絞る。グローバル設定の MCP まで毎回 spawn すると
-    # 起動が数秒重くなる（実測で 6.1s → 4.2s）。
-    if bridge.get("cwd"):
-        mcp_config = Path(bridge["cwd"]) / ".mcp.json"
-        if mcp_config.exists():
-            cmd += ["--strict-mcp-config", "--mcp-config", str(mcp_config)]
-    # 分身が触れるファイルは専用の砂場（scratch）だけ。長いスクリプトは
-    # ここに .py で書いて execute_file で回す（修正が差分編集で済み、
-    # コード全文の再出力コストを払わない）。案内は MCP サーバーの
-    # instructions が同じパスを埋め込んで行う。
-    scratch = Path(tempfile.gettempdir()) / "claude-in-blender" / "scratch"
-    try:
-        scratch.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    allowed = ",".join((
-        "mcp__claude-in-blender__*",
-        f"Write({scratch.as_posix()}/**)",
-        f"Edit({scratch.as_posix()}/**)",
-    ))
+    # MCP はこのリポの1台だけに絞り、組み込みツールは無効化する。
+    # グローバル設定の MCP まで毎回 spawn すると起動が数秒重くなる
+    # （実測で 6.1s → 4.2s）。scratch の書き込み・差分編集は MCP 側で担う。
     cmd += [
-        "-p", full_prompt,
-        "--allowedTools", allowed,
+        "--strict-mcp-config", "--mcp-config", str(mcp_config),
+        "--tools", "",
+        # 依頼文はプロセス一覧に出さないため stdin で渡す。
+        "-p",
+        "--allowedTools", "mcp__claude-in-blender__*",
         "--output-format", "json",
     ]
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         p = subprocess.run(
             cmd,
+            input=full_prompt,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=bridge.get("cwd") or str(Path.home()),
             timeout=300,
@@ -232,10 +241,23 @@ def _run_claude(full_prompt):
         try:
             d = json.loads(p.stdout)
             text = str(d.get("result") or d.get("error") or p.stdout[:500])
-            err = bool(d.get("is_error"))
+            err = bool(d.get("is_error")) or p.returncode != 0
             new_sid = d.get("session_id")
-            if new_sid and new_sid != bridge.get("session_id"):
-                _save_session_id(new_sid)
+            is_valid_session_id = (
+                isinstance(new_sid, str)
+                and re.fullmatch(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                    new_sid.lower(),
+                )
+            )
+            if not err and is_valid_session_id and new_sid != bridge.get("session_id"):
+                saved = _save_session_id(new_sid, expected_cwd=cwd)
+                if not saved:
+                    current_bridge = _load_bridge()
+                    if not current_bridge or current_bridge.get("cwd") != cwd:
+                        text += "\n(別プロジェクトに切り替わったため、この会話の接続先は保存しなかった)"
+            if err and p.stderr:
+                text += "\n" + p.stderr[:300]
         except json.JSONDecodeError:
             text = (p.stdout or p.stderr or "空応答")[:500]
             err = p.returncode != 0
@@ -306,6 +328,18 @@ class CLAUDE_OT_copy_reply(bpy.types.Operator):
     def execute(self, context):
         context.window_manager.clipboard = context.window_manager.claude_bridge_reply
         self.report({"INFO"}, "コピーした")
+        return {"FINISHED"}
+
+
+class CLAUDE_OT_clear_log(bpy.types.Operator):
+    bl_idname = "claude.clear_log"
+    bl_label = "実行ログをクリア"
+
+    def execute(self, context):
+        if bridge_server.clear_exec_log():
+            self.report({"INFO"}, "実行ログをクリアした")
+        else:
+            self.report({"INFO"}, "実行ログはない")
         return {"FINISHED"}
 
 
@@ -433,9 +467,11 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             row = layout.row(align=True)
             row.prop(wm, "claude_bridge_collapsed", text="畳む", toggle=True)
             row.operator("claude.copy_reply", icon="COPYDOWN")
+        if bpy.data.texts.get("claude_bridge_log"):
+            layout.operator("claude.clear_log", icon="TRASH")
 
 
-classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply,
+classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_OT_clear_log,
            CLAUDE_OT_refresh_sessions, CLAUDE_OT_pick_session,
            CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
 

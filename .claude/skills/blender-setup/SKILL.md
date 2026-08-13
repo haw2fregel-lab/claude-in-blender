@@ -9,7 +9,7 @@ description: claude-in-blender の初期セットアップ。Python 依存 → �
 
 ## 1. Python 依存
 
-`pip install -r requirements.txt`（`pip` が無ければ `python -m pip install -r requirements.txt`）。
+`python -m pip install -r requirements.txt`。
 
 ## 2. Extension zip のビルド
 
@@ -35,7 +35,8 @@ CLI で入れられない場合（blender が見つからない・サブコマ�
 
 ## 4. 橋の登録（cwd + このセッション）
 
-`python tools/bridge_register.py --cwd .` を実行し、出力された session 末尾8文字を控える。
+`python tools/bridge_register.py --cwd .` を実行する。スキル実行中は `CLAUDE_CODE_SESSION_ID`
+でこのセッションを正確に登録する。出力に `(env)` が無い fallback 時のみ、session 末尾8文字を控える。
 
 ## 5. 疎通確認
 

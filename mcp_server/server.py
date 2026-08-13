@@ -1,7 +1,9 @@
 import base64
 import json
 import os
+import re
 import tempfile
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
@@ -18,10 +20,10 @@ mcp = FastMCP(
         " to save tokens. For example, creating an object,"
         " setting its material, and adjusting lighting should"
         " be one script, not three separate calls.\n\n"
-        "For anything longer than a few lines, write the script"
-        f" to a .py file under {_SCRATCH_DIR}"
-        " and run it with execute_file. Fixing the file with a"
-        " small edit and re-running is much cheaper than"
+        "For anything longer than a few lines, use write_scratch"
+        f" to create a .py file under {_SCRATCH_DIR}"
+        " and run it with execute_file. Use edit_scratch for a"
+        " small edit and re-run it; this is much cheaper than"
         " resending the whole script through execute_code.\n\n"
         "Use get_doc to look up API names before writing code"
         " to avoid retries from wrong function names or"
@@ -45,7 +47,9 @@ mcp = FastMCP(
         " query script (or use get_selection / get_scene_info /"
         " get_object_info) to learn the state, then write the"
         " straight-line action script against the confirmed"
-        " conditions."
+        " conditions.\n\n"
+        "When a timeout or still-running error occurs, do not retry blindly."
+        " First use get_scene_info or get_object_info to verify the actual scene state before continuing."
     ),
 )
 bridge = BlenderBridge()
@@ -56,12 +60,45 @@ def _fmt(result: dict) -> str:
     return json.dumps(result["data"], ensure_ascii=False)
 
 
+def _bridge_error(result: dict) -> RuntimeError:
+    error = result.get("error") or {}
+    msg = error.get("message", "Unknown error")
+    tb = error.get("traceback")
+    return RuntimeError(f"{msg}\n{tb}" if tb else msg)
+
+
+def _validate_scratch_name(name: str) -> str:
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", name) or ".." in name:
+        raise RuntimeError("Scratch file name must use only A-Z, a-z, 0-9, ., _, or - and not contain '..'")
+    if not name.endswith(".py"):
+        raise RuntimeError("Scratch file name must end with .py")
+    return name
+
+
+def _scratch_file_error(path: str) -> RuntimeError:
+    return RuntimeError(f"Only .py files under scratch ({_SCRATCH_DIR}) can be executed: {path}")
+
+
+def _resolve_scratch_file(path: str) -> Path:
+    try:
+        scratch_dir = Path(_SCRATCH_DIR).resolve()
+        scratch_file = Path(path).resolve(strict=True)
+        scratch_file.relative_to(scratch_dir)
+        if scratch_file.suffix != ".py" or not scratch_file.is_file():
+            raise ValueError
+        if scratch_file.stat().st_size > 1024 * 1024:
+            raise ValueError
+    except (OSError, TypeError, ValueError):
+        raise _scratch_file_error(path) from None
+    return scratch_file
+
+
 @mcp.tool()
 def get_bridge_status() -> str:
     """Check if Blender is connected and the bridge addon is running."""
     result = bridge.send("ping")
     if not result.get("ok"):
-        raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
+        raise _bridge_error(result)
     return _fmt(result)
 
 
@@ -70,7 +107,7 @@ def get_viewport_screenshot() -> list:
     """Capture a screenshot of Blender's 3D viewport."""
     result = bridge.send("get_viewport_screenshot")
     if not result.get("ok"):
-        raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
+        raise _bridge_error(result)
     data = result["data"]
     path = data["screenshot_path"]
     try:
@@ -99,8 +136,40 @@ def get_scene_info() -> str:
     """Get current Blender scene info: objects, types, positions, settings."""
     result = bridge.send("get_scene_info")
     if not result.get("ok"):
-        raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
+        raise _bridge_error(result)
     return _fmt(result)
+
+
+@mcp.tool()
+def write_scratch(name: str, content: str) -> str:
+    """Write a Python script to the scratch directory for execute_file."""
+    name = _validate_scratch_name(name)
+    os.makedirs(_SCRATCH_DIR, exist_ok=True)
+    path = Path(_SCRATCH_DIR) / name
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        raise RuntimeError(f"Cannot write scratch file: {e}") from e
+    return f"Wrote {path.resolve()} ({len(content.encode('utf-8'))} bytes)"
+
+
+@mcp.tool()
+def edit_scratch(name: str, old: str, new: str) -> str:
+    """Replace one unique snippet in a scratch Python script before re-running it."""
+    name = _validate_scratch_name(name)
+    path = Path(_SCRATCH_DIR) / name
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise RuntimeError(f"Cannot read scratch file: {e}") from e
+    matches = content.count(old)
+    if matches != 1:
+        raise RuntimeError(f"Expected one match for old text, found {matches}")
+    try:
+        path.write_text(content.replace(old, new, 1), encoding="utf-8")
+    except OSError as e:
+        raise RuntimeError(f"Cannot write scratch file: {e}") from e
+    return f"Updated {path.resolve()} (replaced 1 unique match)"
 
 
 def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") -> list:
@@ -111,9 +180,9 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
         raise RuntimeError(
             f"SyntaxError: {e.msg} ({filename}, line {e.lineno}): {(e.text or '').strip()}"
         )
-    result = bridge.send("execute_code", {"code": code})
+    result = bridge.send("execute_code", {"code": code, "filename": filename})
     if not result.get("ok"):
-        raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
+        raise _bridge_error(result)
 
     def _fmt_exec(res: dict) -> str:
         val = res["data"]["result"]
@@ -159,7 +228,7 @@ def execute_code(code: str, capture_after: bool = False) -> list:
     """Execute Python code inside Blender (bpy available).
     Set a variable called 'result' to return data back.
 
-    For anything longer than a few lines, prefer execute_file.
+    For anything longer than a few lines, use write_scratch then execute_file.
 
     Args:
         code: Python code to execute in Blender's context
@@ -173,8 +242,8 @@ def execute_file(path: str, capture_after: bool = False) -> list:
     """Execute a Python file inside Blender (bpy available).
     Set a variable called 'result' in the file to return data back.
 
-    Prefer this over execute_code for longer scripts: write the file,
-    run it, fix it with small edits, re-run — much cheaper than
+    Prefer this over execute_code for longer scripts: use write_scratch,
+    run the returned path, fix it with edit_scratch, re-run — much cheaper than
     resending the whole script. Syntax errors are caught locally
     (with file line numbers) before reaching Blender.
 
@@ -182,8 +251,9 @@ def execute_file(path: str, capture_after: bool = False) -> list:
         path: Absolute path to a Python (.py) file
         capture_after: If True, capture a viewport screenshot after execution
     """
+    scratch_file = _resolve_scratch_file(path)
     try:
-        with open(path, encoding="utf-8") as f:
+        with scratch_file.open(encoding="utf-8") as f:
             code = f.read()
     except OSError as e:
         raise RuntimeError(f"Cannot read file: {e}")
@@ -199,7 +269,7 @@ def get_selection() -> str:
     """
     result = bridge.send("get_selection")
     if not result.get("ok"):
-        raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
+        raise _bridge_error(result)
     return _fmt(result)
 
 
@@ -215,7 +285,7 @@ def get_object_info(name: str = "") -> str:
     params = {"name": name} if name else {}
     result = bridge.send("get_object_info", params)
     if not result.get("ok"):
-        raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
+        raise _bridge_error(result)
     return _fmt(result)
 
 
@@ -236,7 +306,7 @@ def get_doc(identifier: str) -> str:
     """
     result = bridge.send("get_doc", {"identifier": identifier})
     if not result.get("ok"):
-        raise RuntimeError(result.get("error", {}).get("message", "Unknown error"))
+        raise _bridge_error(result)
     return _fmt(result)
 
 

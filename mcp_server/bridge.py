@@ -2,6 +2,7 @@ import json
 import os
 import socket
 import tempfile
+import uuid
 
 _TOKEN_FILE = os.path.join(
     tempfile.gettempdir(), "claude-in-blender", "blender-session-token"
@@ -28,19 +29,21 @@ class BlenderBridge:
             or {"ok": False, "error": {"message": ...}, "elapsed_ms": int}
         """
         token = self._read_token()
+        request_id = uuid.uuid4().hex
         payload = (
             json.dumps(
                 {
                     "token": token,
                     "command": command,
                     "params": params or {},
+                    "request_id": request_id,
                 }
             )
             + "\n"
         )
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(30)
+        sock.settimeout(75)
         try:
             sock.connect((self._host, self._port))
             sock.sendall(payload.encode("utf-8"))
@@ -56,14 +59,20 @@ class BlenderBridge:
                         f"Response too large ({len(buffer)} bytes)"
                     )
             line = buffer.split(b"\n", 1)[0]
-            return json.loads(line.decode("utf-8"))
+            result = json.loads(line.decode("utf-8"))
+            if not isinstance(result, dict) or "ok" not in result:
+                return self._connection_error("Malformed response from Blender bridge")
+            return result
         except ConnectionRefusedError:
             return self._connection_error(
                 "Cannot connect to Blender. Is the bridge addon enabled?"
             )
         except TimeoutError:
             return self._connection_error(
-                "Connection to Blender timed out (30s)", elapsed_ms=30000
+                "No response from Blender in 75s "
+                f"(request {request_id}). The operation may still be running — "
+                "outcome unknown. Do not retry blindly; check scene state first.",
+                elapsed_ms=75000,
             )
         except json.JSONDecodeError:
             return self._connection_error(

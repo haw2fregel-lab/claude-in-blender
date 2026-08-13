@@ -7,13 +7,15 @@
   python tools/bridge_register.py --cwd . --session-id <uuid> # 明示指定
   python tools/bridge_register.py --cwd . --cwd-only          # cwd だけ登録
 
---session-id 省略時は、cwd のプロジェクトの transcript
-(~/.claude/projects/<slug>/*.jsonl) の最新ファイルを「今のセッション」とみなす。
-並行セッションがあると取り違えうるので、出力の末尾8文字を
-Blender パネルの「接続先」表示と目で照合すること。
+--session-id 省略時は、まず Claude Code セッション内の
+CLAUDE_CODE_SESSION_ID を使う。環境変数が無い場合だけ、cwd のプロジェクトの
+transcript (~/.claude/projects/<slug>/*.jsonl) の最新ファイルを fallback として使う。
+fallback は並行セッションを取り違えうるため、出力の末尾8文字を Blender パネルの
+「接続先」表示と目で照合すること。
 """
 import argparse
 import json
+import os
 import re
 import shutil
 import time
@@ -51,8 +53,16 @@ def main():
 
     cwd = str(Path(args.cwd).resolve()).replace("\\", "/")
     session_id = None
+    session_source = None
     if not args.cwd_only:
-        session_id = args.session_id or latest_session(cwd)
+        if args.session_id:
+            session_id = args.session_id
+            session_source = "explicit"
+        else:
+            session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+            session_source = "env" if session_id else "fallback"
+            if not session_id:
+                session_id = latest_session(cwd)
 
     data = {}
     if BRIDGE_FILE.exists():
@@ -69,13 +79,20 @@ def main():
         "registered_by": "bridge_register.py",
     })
     BRIDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    BRIDGE_FILE.write_text(
+    temp_file = BRIDGE_FILE.with_suffix(".json.tmp")
+    temp_file.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp_file, BRIDGE_FILE)
 
     print(f"registered: {BRIDGE_FILE}")
     print(f"  cwd       : {cwd}")
     if session_id:
-        print(f"  session   : ...{session_id[-8:]}  (パネルの「接続先」表示と照合してね)")
+        if session_source == "env":
+            print(f"  session   : ...{session_id[-8:]}  (セッション自動特定 (env))")
+        elif session_source == "fallback":
+            print(f"  session   : ...{session_id[-8:]}  (パネルの「接続先」表示と照合してね)")
+        else:
+            print(f"  session   : ...{session_id[-8:]}  (明示指定)")
     else:
         print("  session   : (未接続 — パネル側で選択するか、新規セッションで送信)")
 
