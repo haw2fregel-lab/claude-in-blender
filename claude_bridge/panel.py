@@ -6,10 +6,12 @@ session_id は ~/.claude/blender-bridge-session.json (Claude Code 側が登録) 
 応答側の Claude は、このアドオンに内蔵の受け口 (bridge_server) 経由で Blender を操作する。
 """
 import json
+import re
 import shutil
 import subprocess
 import threading
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import blf
@@ -89,6 +91,76 @@ def _load_bridge():
         return None
 
 
+def _save_session_id(session_id):
+    """bridge ファイルの session_id だけ書き換える（cwd 等の設定は保持）。"""
+    data = _load_bridge() or {}
+    data["session_id"] = session_id
+    data["registered_by"] = "claude_bridge panel"
+    try:
+        BRIDGE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _project_slug(cwd):
+    """Claude Code の projects ディレクトリ名（英数字以外を - に置換）。"""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+# セッション一覧のキャッシュ。draw は redraw のたびに走るので、
+# jsonl を読むのは「一覧を読み込む/更新」オペレータの時だけにする。
+_session_cache = {"cwd": None, "items": (), "loaded": False}
+
+
+def _first_user_message(path, max_lines=30):
+    """transcript 先頭から最初のユーザー発言を抜く（一覧の見出し用）。
+
+    transcript は非公開フォーマットなので、読めなかったら黙って諦める。
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "queue-operation" and d.get("operation") == "enqueue":
+                    c = d.get("content")
+                    if isinstance(c, str) and c.strip():
+                        return c.strip()
+                if d.get("type") == "user":
+                    c = (d.get("message") or {}).get("content")
+                    if isinstance(c, str) and c.strip():
+                        return c.strip()
+                    if isinstance(c, list):
+                        for b in c:
+                            if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
+                                return b["text"].strip()
+    except OSError:
+        pass
+    return "(発言なし)"
+
+
+def _load_sessions(cwd, limit=5):
+    """cwd のプロジェクトの直近セッションを (id, 表示ラベル) で返す。"""
+    proj = Path.home() / ".claude" / "projects" / _project_slug(cwd)
+    try:
+        files = sorted(proj.glob("*.jsonl"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        files = []
+    items = []
+    for f in files[:limit]:
+        stamp = datetime.fromtimestamp(f.stat().st_mtime).strftime("%m/%d %H:%M")
+        head = _first_user_message(f)
+        items.append((f.stem, f"{stamp}  {head[:24]}"))
+    return tuple(items)
+
+
 def _find_claude(bridge):
     exe = (bridge or {}).get("claude_exe")
     if exe and Path(exe).exists():
@@ -109,17 +181,20 @@ def _run_claude(full_prompt):
     """
     global _result_box
     bridge = _load_bridge()
-    if not bridge or not bridge.get("session_id"):
+    if not bridge or not (bridge.get("session_id") or bridge.get("cwd")):
         _result_box = {"ready": True, "error": True,
-                       "text": "セッション未登録: Claude Code 側で登録ファイルを書いてもらってね"}
+                       "text": "未セットアップ: Claude Code で /blender-setup を実行してね"}
         return
     claude = _find_claude(bridge)
     if not claude:
         _result_box = {"ready": True, "error": True, "text": "claude コマンドが見つからない"}
         return
-    cmd = [
-        claude,
-        "-r", bridge["session_id"],
+    # session_id があれば継続 (-r)、なければ新規セッションとして実行。
+    # 新規の場合は応答の session_id を保存して、次の送信から続きになる。
+    cmd = [claude]
+    if bridge.get("session_id"):
+        cmd += ["-r", bridge["session_id"]]
+    cmd += [
         "-p", full_prompt,
         "--allowedTools", "mcp__claude-in-blender__*",
         "--output-format", "json",
@@ -137,6 +212,9 @@ def _run_claude(full_prompt):
             d = json.loads(p.stdout)
             text = str(d.get("result") or d.get("error") or p.stdout[:500])
             err = bool(d.get("is_error"))
+            new_sid = d.get("session_id")
+            if new_sid and new_sid != bridge.get("session_id"):
+                _save_session_id(new_sid)
         except json.JSONDecodeError:
             text = (p.stdout or p.stderr or "空応答")[:500]
             err = p.returncode != 0
@@ -210,6 +288,51 @@ class CLAUDE_OT_copy_reply(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDE_OT_refresh_sessions(bpy.types.Operator):
+    bl_idname = "claude.refresh_sessions"
+    bl_label = "一覧を更新"
+    bl_description = "このプロジェクトの直近セッションを読み直す"
+
+    def execute(self, context):
+        bridge = _load_bridge() or {}
+        cwd = bridge.get("cwd")
+        if not cwd:
+            self.report({"WARNING"}, "cwd 未登録")
+            return {"CANCELLED"}
+        _session_cache["cwd"] = cwd
+        _session_cache["items"] = _load_sessions(cwd)
+        _session_cache["loaded"] = True
+        return {"FINISHED"}
+
+
+class CLAUDE_OT_pick_session(bpy.types.Operator):
+    bl_idname = "claude.pick_session"
+    bl_label = "このセッションに繋ぐ"
+    bl_description = "選んだセッションを接続先として登録する"
+
+    session_id: bpy.props.StringProperty()
+
+    def execute(self, context):
+        if _save_session_id(self.session_id):
+            self.report({"INFO"}, "接続先: ..." + self.session_id[-8:])
+        else:
+            self.report({"ERROR"}, "登録ファイルを書けなかった")
+        return {"FINISHED"}
+
+
+class CLAUDE_OT_disconnect_session(bpy.types.Operator):
+    bl_idname = "claude.disconnect_session"
+    bl_label = "接続を解除"
+    bl_description = "セッションの接続を解除する（登録した cwd は残るので、選び直しや新規送信はできる）"
+
+    def execute(self, context):
+        if _save_session_id(None):
+            self.report({"INFO"}, "接続を解除した")
+        else:
+            self.report({"ERROR"}, "登録ファイルを書けなかった")
+        return {"FINISHED"}
+
+
 class CLAUDE_PT_panel(bpy.types.Panel):
     bl_label = "Claude Bridge"
     bl_space_type = "VIEW_3D"
@@ -220,10 +343,32 @@ class CLAUDE_PT_panel(bpy.types.Panel):
         wm = context.window_manager
         layout = self.layout
         bridge = _load_bridge()
-        if bridge and bridge.get("session_id"):
-            layout.label(text="接続先: ..." + bridge["session_id"][-8:], icon="LINKED")
+        sid = (bridge or {}).get("session_id")
+        cwd = (bridge or {}).get("cwd")
+        if not sid and not cwd:
+            # 完全初期状態: 案内だけ出して終わり
+            layout.label(text="未セットアップ", icon="ERROR")
+            layout.label(text="Claude Code で /blender-setup を実行してね")
+            return
+        if sid:
+            row = layout.row(align=True)
+            row.label(text="接続先: ..." + sid[-8:], icon="LINKED")
+            row.operator("claude.disconnect_session", text="", icon="X")
         else:
-            layout.label(text="セッション未登録", icon="UNLINKED")
+            # cwd だけある: 既存セッションを選ぶか、新規のまま送るか
+            layout.label(text="セッション未接続", icon="UNLINKED")
+            box = layout.box()
+            box.label(text="接続先を選ぶ (直近5件):")
+            cache_ok = _session_cache["loaded"] and _session_cache["cwd"] == cwd
+            if cache_ok:
+                for pick_id, pick_label in _session_cache["items"]:
+                    op = box.operator("claude.pick_session", text=pick_label)
+                    op.session_id = pick_id
+                if not _session_cache["items"]:
+                    box.label(text="(セッションが無い — 新規で送れるよ)")
+            box.operator("claude.refresh_sessions",
+                         text="一覧を読み込む" if not cache_ok else "更新",
+                         icon="FILE_REFRESH")
         if bridge_server.is_running():
             layout.label(text="受け口: 稼働中", icon="CHECKMARK")
         else:
@@ -236,7 +381,10 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             grid.prop(wm, prop)
         row = layout.row()
         row.enabled = wm.claude_bridge_status != "WORKING"
-        row.operator("claude.send_request", icon="PLAY")
+        if sid:
+            row.operator("claude.send_request", icon="PLAY")
+        else:
+            row.operator("claude.send_request", text="新規セッションで送る", icon="PLAY")
         status = wm.claude_bridge_status
         if status == "WORKING":
             layout.label(text="処理中... (数十秒かかるよ)", icon="SORTTIME")
@@ -266,7 +414,9 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             row.operator("claude.copy_reply", icon="COPYDOWN")
 
 
-classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_PT_panel)
+classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply,
+           CLAUDE_OT_refresh_sessions, CLAUDE_OT_pick_session,
+           CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
 
 _WM_PROPS = ("claude_bridge_prompt", "claude_bridge_status",
              "claude_bridge_reply", "claude_bridge_collapsed") + tuple(

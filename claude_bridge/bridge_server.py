@@ -32,7 +32,17 @@ _SCREENSHOT_MAX_SIZE = 768
 _MAX_RESPONSE_BYTES = 50_000
 
 # ping が返す addon_version。blender_manifest.toml の version と合わせる。
-_ADDON_VERSION = (1, 5, 0)
+def _read_version():
+    # blender_manifest.toml が正（バージョンの二重管理を避ける）
+    try:
+        import tomllib
+        with open(os.path.join(os.path.dirname(__file__), "blender_manifest.toml"), "rb") as f:
+            return tomllib.load(f)["version"]
+    except Exception:  # noqa: BLE001 - 読めなくても ping は返せるように
+        return "unknown"
+
+
+_ADDON_VERSION = _read_version()
 
 _running = False
 _pending = []
@@ -151,7 +161,7 @@ def _cmd_ping(_params):
     return _ok(
         {
             "blender_version": ".".join(str(v) for v in bpy.app.version),
-            "addon_version": ".".join(str(v) for v in _ADDON_VERSION),
+            "addon_version": _ADDON_VERSION,
             "execute_code_enabled": _execute_code_enabled,
             "scene_name": bpy.context.scene.name,
         },

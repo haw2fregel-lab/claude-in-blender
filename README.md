@@ -4,13 +4,14 @@
 
 Blender の N パネルに小さな窓を開き、いま使っている Claude Code のセッションにそのまま依頼を送る逆方向連携です。頼んだ作業は Claude が同梱の MCP サーバー経由で Blender を直接操作して実行します——デスクトップでの会話の続きのまま、Blender から出ずに。
 
-> 開発中（試作 v1.5）。動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows
+> 開発中（試作 v1.6）。動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows
 
 ## 何ができる
 
 - Blender の N パネル（サイドバー「Claude」タブ）から日本語で依頼を送る
 - コンテキストトグル——「選択中を対象に」「シーン情報を見てから」「ドキュメントを調べてから」「スクショを確認してから」を、チェック一つで依頼に載せられる
 - 応答側はデスクトップの Claude Code と**同じセッション**——会話の文脈・あなたの設定・CLAUDE.md がそのまま生きる
+- セッション未接続でもパネルから復帰できる——直近セッション（5件）から選ぶか、新規セッションでそのまま送る
 - 依頼された作業は同梱 MCP サーバーのツール経由で Blender を直接操作（シーンが目の前で変わる）
 
 ## 仕組みとセキュリティ
@@ -33,28 +34,32 @@ Blender の N パネルに小さな窓を開き、いま使っている Claude C
 - Python 3.10+（MCP サーバー用。`pip install -r requirements.txt`）
 - Blender 4.2+
 
-## セットアップ（試作段階）
+## セットアップ
 
-1. このリポジトリを clone して `pip install -r requirements.txt`
-2. Claude Code をこのリポジトリで開く——同梱 `.mcp.json` が MCP サーバーを登録します（初回に承認を求められます）
-3. アドオン zip をビルドして（下記）Blender にインストール: Edit > Preferences > Get Extensions → 右上の v メニュー → **Install from Disk**
-4. Claude Code 側でセッション情報を `~/.claude/blender-bridge-session.json` に登録（現状は手書き。自動化予定）
-5. 3D Viewport で N キー →「Claude」タブ → 依頼を書いて送信
+1. このリポジトリを clone して Claude Code で開く——同梱 `.mcp.json` が MCP サーバーを登録します（初回に承認を求められます）
+2. Claude Code に「**Blender のセットアップして**」と頼む（`/blender-setup`）——Python 依存・アドオンのインストール・橋の登録・疎通確認まで一括でやってくれます
+3. 3D Viewport で N キー →「Claude」タブ → 依頼を書いて送信
 
-### zip のビルド（開発者向け）
+次から別の会話に繋ぎ直す時は「**Blender 繋いで**」（`/blender-bridge`）の一言で。パネル側からも、未接続なら直近セッションの選択・新規セッションでの送信ができます。
 
-`claude_bridge/` の中身がルートに来る形で zip に固める。PowerShell なら:
+<details>
+<summary>手動セットアップ（スキルを使わない場合）</summary>
 
-```powershell
-Compress-Archive -Path claude_bridge\* -DestinationPath dist\claude_bridge-1.5.0.zip
-```
+1. `pip install -r requirements.txt`
+2. `python tools/build_extension.py` で zip をビルド（`dist/claude_bridge-<version>.zip`）
+3. Blender の Edit > Preferences > Get Extensions → 右上の v メニュー → **Install from Disk** で zip を選ぶ
+4. `python tools/bridge_register.py --cwd .` で橋（cwd + 今のセッション）を登録
+
+</details>
+
+開発中にアドオンを直したら「**アドオン更新して**」（`/blender-update`）——ビルドから実機へのホットリロードまで一括でやります。
 
 ## ロードマップ
 
 - [x] アドオン化（インストール式・Run Script 卒業）— v1.4 で Blender Extension 形式に
 - [x] MCP サーバーの同梱 — v1.5 で自己完結に
 - [x] コンテキストボタン（選択・ビューポートを見てもらう）— v1.5 でトグルに
-- [ ] セッション登録の自動化
+- [x] セッション登録の自動化 — v1.6 でスキル同梱（`/blender-setup`・`/blender-bridge`）+ パネルから選択/新規
 - [ ] 送信ロックと同時実行の安全策
 
 ## ライセンス
