@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "claude_bridge"
-version = "1.10.0"
+version = "0.10.0"
 name = "Claude Bridge"
 tagline = "Send requests to your Claude Code session from inside Blender"
 maintainer = "haw2fregel"
