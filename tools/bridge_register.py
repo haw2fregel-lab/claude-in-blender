@@ -11,7 +11,7 @@
 CLAUDE_CODE_SESSION_ID を使う。環境変数が無い場合だけ、cwd のプロジェクトの
 transcript (~/.claude/projects/<slug>/*.jsonl) の最新ファイルを fallback として使う。
 fallback は並行セッションを取り違えうるため、出力の末尾8文字を Blender パネルの
-「接続先」表示と目で照合すること。
+「接続先」表示と目で照合すること。CLAUDE_CONFIG_DIR が非空なら、その配下を使う。
 """
 import argparse
 import json
@@ -19,9 +19,38 @@ import os
 import re
 import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-BRIDGE_FILE = Path.home() / ".claude" / "blender-bridge-session.json"
+CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+BRIDGE_FILE = CLAUDE_CONFIG_DIR / "blender-bridge-session.json"
+
+
+@contextmanager
+def lock_bridge_file(bridge_file):
+    """Blender panel と登録処理の read-modify-write を直列化する。"""
+    lock_file = bridge_file.with_suffix(bridge_file.suffix + ".lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a+b") as handle:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def project_slug(cwd):
@@ -30,7 +59,7 @@ def project_slug(cwd):
 
 
 def latest_session(cwd):
-    proj = Path.home() / ".claude" / "projects" / project_slug(cwd)
+    proj = CLAUDE_CONFIG_DIR / "projects" / project_slug(cwd)
     files = sorted(proj.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     return files[0].stem if files else None
 
@@ -64,25 +93,26 @@ def main():
             if not session_id:
                 session_id = latest_session(cwd)
 
-    data = {}
-    if BRIDGE_FILE.exists():
-        try:
-            data = json.loads(BRIDGE_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            data = {}
+    with lock_bridge_file(BRIDGE_FILE):
+        data = {}
+        if BRIDGE_FILE.exists():
+            try:
+                loaded = json.loads(BRIDGE_FILE.read_text(encoding="utf-8"))
+                data = loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                data = {}
 
-    data.update({
-        "session_id": session_id,
-        "cwd": cwd,
-        "claude_exe": data.get("claude_exe") or find_claude(),
-        "registered_at": time.strftime("%Y-%m-%d %H:%M"),
-        "registered_by": "bridge_register.py",
-    })
-    BRIDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = BRIDGE_FILE.with_suffix(".json.tmp")
-    temp_file.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temp_file, BRIDGE_FILE)
+        data.update({
+            "session_id": session_id,
+            "cwd": cwd,
+            "claude_exe": data.get("claude_exe") or find_claude(),
+            "registered_at": time.strftime("%Y-%m-%d %H:%M"),
+            "registered_by": "bridge_register.py",
+        })
+        temp_file = BRIDGE_FILE.with_suffix(".json.tmp")
+        temp_file.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp_file, BRIDGE_FILE)
 
     print(f"registered: {BRIDGE_FILE}")
     print(f"  cwd       : {cwd}")

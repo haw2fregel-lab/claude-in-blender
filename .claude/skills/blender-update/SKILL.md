@@ -40,7 +40,7 @@ def _do_update():
             bpy.ops.preferences.addon_enable(module="bl_ext.user_default.claude_bridge")
         except Exception:
             traceback.print_exc()
-        print("[claude-bridge-update] install failed — kept previous version")
+        print("[claude-bridge-update] install failed — previous versionへの復帰は保証されない")
         return None
     for name in list(sys.modules):
         if name.startswith("bl_ext.user_default.claude_bridge"):

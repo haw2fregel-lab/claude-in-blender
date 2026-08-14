@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import threading
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +22,8 @@ import bpy
 from . import bridge_server
 
 BRIDGE_FILE = Path.home() / ".claude" / "blender-bridge-session.json"
+_bridge_file_lock = threading.Lock()
+_EXPECTED_SESSION_UNSET = object()
 
 # コンテキストトグル: (WindowManager プロパティ名, UI ラベル, 送信文に乗る指示)
 # チェックした分だけ「これを使ってから作業して」が依頼の頭に乗る。
@@ -83,28 +86,98 @@ def _wrap_text_px(text, max_px, context):
     return lines
 
 
+def _claude_config_root():
+    """Claude Code の設定ルート。明示設定がなければ従来の ~/.claude を使う。"""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(config_dir) if config_dir else Path.home() / ".claude"
+
+
+def _bridge_file():
+    """現在の Claude 設定ルートに対応する bridge ファイルを返す。"""
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return _claude_config_root() / "blender-bridge-session.json"
+    return BRIDGE_FILE
+
+
+@contextmanager
+def _lock_bridge_file(bridge_file):
+    """panel と登録ツールの read-modify-write を同じ OS lock で直列化する。"""
+    lock_file = bridge_file.with_suffix(bridge_file.suffix + ".lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a+b") as handle:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _load_bridge():
-    if not BRIDGE_FILE.exists():
+    """bridge 設定を dict だけとして読む。壊れた root は未設定扱いにする。"""
+    bridge_file = _bridge_file()
+    if not bridge_file.exists():
         return None
     try:
-        return json.loads(BRIDGE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(bridge_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None
 
 
-def _save_session_id(session_id, expected_cwd=None):
-    """bridge ファイルの session_id だけ書き換える（cwd 等の設定は保持）。"""
-    data = _load_bridge() or {}
+def _matches_bridge_preconditions(data, expected_cwd, expected_session_id):
+    """CAS 保存の前提が現在の bridge 設定にも残っているかを返す。"""
+    if data is None:
+        return False
     if expected_cwd is not None and data.get("cwd") != expected_cwd:
         return False
-    data["session_id"] = session_id
-    data["registered_by"] = "claude_bridge panel"
-    temp_file = BRIDGE_FILE.with_suffix(".json.tmp")
+    return (expected_session_id is _EXPECTED_SESSION_UNSET
+            or data.get("session_id") == expected_session_id)
+
+
+def _save_session_id(session_id, expected_cwd=None,
+                     expected_session_id=_EXPECTED_SESSION_UNSET):
+    """前提が一致する場合だけ bridge の session_id を原子的に置き換える。
+
+    expected_cwd / expected_session_id は worker 開始時の接続先を CAS 前提にする。
+    既存の手動選択・切断呼び出しは前提を渡さず、従来どおり保存できる。
+    """
+    bridge_file = _bridge_file()
     try:
-        temp_file.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp_file, BRIDGE_FILE)
-        return True
+        # thread lock は panel 内、OS lock は bridge_register との競合を閉じる。
+        with _bridge_file_lock, _lock_bridge_file(bridge_file):
+            data = _load_bridge()
+            if data is None:
+                # 従来どおり、手動操作はまだ存在しない登録ファイルを作成できる。
+                # ただし worker の CAS 保存や壊れた JSON root は未設定として拒否する。
+                if (bridge_file.exists() or expected_cwd is not None
+                        or expected_session_id is not _EXPECTED_SESSION_UNSET):
+                    return False
+                data = {}
+            if not _matches_bridge_preconditions(
+                    data, expected_cwd, expected_session_id):
+                return False
+            data = dict(data)
+            data["session_id"] = session_id
+            data["registered_by"] = "claude_bridge panel"
+            temp_file = bridge_file.with_suffix(".json.tmp")
+            temp_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(temp_file, bridge_file)
+            return True
     except OSError:
         return False
 
@@ -152,7 +225,7 @@ def _first_user_message(path, max_lines=30):
 
 def _load_sessions(cwd, limit=5):
     """cwd のプロジェクトの直近セッションを (id, 表示ラベル) で返す。"""
-    proj = Path.home() / ".claude" / "projects" / _project_slug(cwd)
+    proj = _claude_config_root() / "projects" / _project_slug(cwd)
     try:
         files = sorted(proj.glob("*.jsonl"),
                        key=lambda p: p.stat().st_mtime, reverse=True)
@@ -276,10 +349,11 @@ def _run_claude(full_prompt):
             usage = ""
             if last_usage:
                 # キャッシュ再利用=ほぼ無料で読めた分 / 新規=今回課金枠を食った分。
-                # 最終コール単体なので、二つの合計 ≒ この線の今のコンテキスト量。
+                # 新規は通常入力とキャッシュ作成入力の両方である。
                 usage = "キャッシュ再利用 {:,} / 新規 {:,}".format(
                     last_usage.get("cache_read_input_tokens") or 0,
-                    last_usage.get("cache_creation_input_tokens") or 0)
+                    ((last_usage.get("input_tokens") or 0)
+                     + (last_usage.get("cache_creation_input_tokens") or 0)))
             new_sid = d.get("session_id")
             is_valid_session_id = (
                 isinstance(new_sid, str)
@@ -289,17 +363,23 @@ def _run_claude(full_prompt):
                 )
             )
             if not err and is_valid_session_id and new_sid != bridge.get("session_id"):
-                saved = _save_session_id(new_sid, expected_cwd=cwd)
+                saved = _save_session_id(
+                    new_sid,
+                    expected_cwd=cwd,
+                    expected_session_id=bridge.get("session_id"),
+                )
                 if not saved:
                     current_bridge = _load_bridge()
-                    if not current_bridge or current_bridge.get("cwd") != cwd:
-                        text += "\n(別プロジェクトに切り替わったため、この会話の接続先は保存しなかった)"
+                    if (not current_bridge or current_bridge.get("cwd") != cwd
+                            or current_bridge.get("session_id") != bridge.get("session_id")):
+                        text += "\n(接続先が切り替わったため、この会話の接続先は保存しなかった)"
             if err and p.stderr:
                 text += "\n" + p.stderr[:300]
         else:
             # result イベントが来ていない = stream-json として読めない応答
-            text = (p.stdout or p.stderr or "空応答")[:500]
-            err = p.returncode != 0
+            text = "プロトコルエラー: result イベントがありません\n" + (
+                p.stdout or p.stderr or "空応答")[:500]
+            err = True
             usage = ""
         _result_box = {"ready": True, "text": text, "error": err, "usage": usage}
     except subprocess.TimeoutExpired:
@@ -354,6 +434,9 @@ class CLAUDE_OT_send(bpy.types.Operator):
     def execute(self, context):
         global _worker
         wm = context.window_manager
+        if not bridge_server.is_running():
+            self.report({"ERROR"}, "受け口が停止中のため送信できない")
+            return {"CANCELLED"}
         prompt = wm.claude_bridge_prompt.strip()
         if not prompt:
             self.report({"WARNING"}, "依頼が空だよ")
@@ -452,6 +535,8 @@ class CLAUDE_PT_panel(bpy.types.Panel):
         bridge = _load_bridge()
         sid = (bridge or {}).get("session_id")
         cwd = (bridge or {}).get("cwd")
+        status = wm.claude_bridge_status
+        is_working = status == "WORKING"
         if not sid and not cwd:
             # 完全初期状態: 案内だけ出して終わり
             layout.label(text="未セットアップ", icon="ERROR")
@@ -459,12 +544,14 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             return
         if sid:
             row = layout.row(align=True)
+            row.enabled = not is_working
             row.label(text="接続先: ..." + sid[-8:], icon="LINKED")
             row.operator("claude.disconnect_session", text="", icon="X")
         else:
             # cwd だけある: 既存セッションを選ぶか、新規のまま送るか
             layout.label(text="セッション未接続", icon="UNLINKED")
             box = layout.box()
+            box.enabled = not is_working
             box.label(text="接続先を選ぶ (直近5件):")
             cache_ok = _session_cache["loaded"] and _session_cache["cwd"] == cwd
             if cache_ok:
@@ -487,12 +574,11 @@ class CLAUDE_PT_panel(bpy.types.Panel):
         for prop, _label, _text in _CTX_TOGGLES:
             grid.prop(wm, prop)
         row = layout.row()
-        row.enabled = wm.claude_bridge_status != "WORKING"
+        row.enabled = not is_working and bridge_server.is_running()
         if sid:
             row.operator("claude.send_request", icon="PLAY")
         else:
             row.operator("claude.send_request", text="新規セッションで送る", icon="PLAY")
-        status = wm.claude_bridge_status
         if status == "WORKING":
             layout.label(text="処理中... (数十秒かかるよ)", icon="SORTTIME")
         elif status == "DONE":

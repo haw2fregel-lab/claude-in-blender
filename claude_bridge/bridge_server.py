@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections import OrderedDict
 
 import bpy
 
@@ -31,13 +32,19 @@ _EXEC_TIMEOUT_S = 30
 _MAX_OUTPUT_BYTES = 1_000_000
 _SCREENSHOT_MAX_SIZE = 768
 _MAX_RESPONSE_BYTES = 50_000
+_REQUEST_JOURNAL_LIMIT = 256
+_FINAL_REQUEST_STATUSES = frozenset({"succeeded", "failed"})
+
 
 # ping が返す addon_version。blender_manifest.toml の version と合わせる。
 def _read_version():
     # blender_manifest.toml が正（バージョンの二重管理を避ける）
     try:
         import tomllib
-        with open(os.path.join(os.path.dirname(__file__), "blender_manifest.toml"), "rb") as f:
+
+        with open(
+            os.path.join(os.path.dirname(__file__), "blender_manifest.toml"), "rb"
+        ) as f:
             return tomllib.load(f)["version"]
     except Exception:  # noqa: BLE001 - 読めなくても ping は返せるように
         return "unknown"
@@ -46,6 +53,7 @@ def _read_version():
 _ADDON_VERSION = _read_version()
 
 _running = False
+_ready = False
 _pending = []
 _pending_lock = threading.Lock()
 _server_socket = None
@@ -58,6 +66,10 @@ _conns_lock = threading.Lock()
 # 「実行中か」ではなく「積む時に既に居るか」で判定しないと、timer が長く止まった間の
 # 再送が同じ batch に滑り込み、順に二重実行される（積む判定と投入は同じ lock 区間で行う）。
 _exec_busy = False
+_current_exec_request_id = None
+# execute_code の結果追跡。Blender の同一プロセス内だけで保持し、_pending_lock で守る。
+_request_journal = OrderedDict()
+_blocked_request_id = None
 _port = _DEFAULT_PORT
 
 _TMP_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender")
@@ -83,6 +95,118 @@ def _err(message, tb=None, start=None):
     return {"ok": False, "error": error, "elapsed_ms": elapsed}
 
 
+# ── Request journal ───────────────────────────────────────
+
+
+def _is_uuid_string(value):
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        uuid.UUID(value)
+    except (AttributeError, ValueError):
+        return False
+    return True
+
+
+def _journal_public_entry(entry):
+    return {key: value for key, value in entry.items() if not key.startswith("_")}
+
+
+def _journal_create_locked(request_id, command):
+    """Create a bounded journal entry. Caller holds _pending_lock."""
+    while len(_request_journal) >= _REQUEST_JOURNAL_LIMIT:
+        evict_id = next(
+            (
+                known_id
+                for known_id, entry in _request_journal.items()
+                if known_id != _blocked_request_id
+                and entry["status"] in _FINAL_REQUEST_STATUSES
+            ),
+            None,
+        )
+        if evict_id is None:
+            return False
+        del _request_journal[evict_id]
+
+    now_wall = time.time()
+    _request_journal[request_id] = {
+        "request_id": request_id,
+        "status": "queued",
+        "command": command,
+        "created_at": now_wall,
+        "updated_at": now_wall,
+        "elapsed_ms": 0,
+        "_started_monotonic": time.monotonic(),
+    }
+    return True
+
+
+def _journal_update_locked(request_id, status, error=None):
+    """Update a journal entry. Caller holds _pending_lock."""
+    entry = _request_journal.get(request_id)
+    if entry is None:
+        return
+    entry["status"] = status
+    entry["updated_at"] = time.time()
+    entry["elapsed_ms"] = round((time.monotonic() - entry["_started_monotonic"]) * 1000)
+    if error:
+        entry["error"] = str(error)
+    elif status == "succeeded":
+        entry.pop("error", None)
+
+
+def _request_status_response(operation_id, start):
+    """Answer from the client thread so status works while Blender is busy."""
+    if not isinstance(operation_id, str) or not operation_id:
+        return _err("operation_id must be a non-empty string", start=start)
+
+    with _pending_lock:
+        entry = _request_journal.get(operation_id)
+        if entry is None:
+            resp = _err(f"Unknown request: {operation_id}", start=start)
+            resp["request_id"] = operation_id
+            return resp
+        snapshot = _journal_public_entry(entry)
+
+    return _ok(snapshot, start)
+
+
+def _ack_request_result_response(operation_id, start):
+    """Release the mutation blocker only after a final result was delivered."""
+    global _blocked_request_id
+
+    if not isinstance(operation_id, str) or not operation_id:
+        return _err("operation_id must be a non-empty string", start=start)
+
+    with _pending_lock:
+        entry = _request_journal.get(operation_id)
+        if entry is None:
+            return _err(f"Unknown request: {operation_id}", start=start)
+        if entry["status"] not in _FINAL_REQUEST_STATUSES:
+            return _err(
+                f"Request {operation_id} is not final (status: {entry['status']})",
+                start=start,
+            )
+        if _blocked_request_id != operation_id:
+            blocker = _blocked_request_id or "none"
+            return _err(
+                f"Request {operation_id} is not the pending acknowledgement "
+                f"(current blocker: {blocker})",
+                start=start,
+            )
+        _blocked_request_id = None
+        snapshot = _journal_public_entry(entry)
+
+    return _ok(
+        {
+            "request_id": snapshot["request_id"],
+            "status": snapshot["status"],
+            "acknowledged": True,
+        },
+        start,
+    )
+
+
 # ── Exec log ──────────────────────────────────────────────
 
 _LOG_NAME = "claude_bridge_log"
@@ -100,7 +224,7 @@ def _log_exec(text):
         log = bpy.data.texts.get(_LOG_NAME) or bpy.data.texts.new(_LOG_NAME)
         log.write(text + "\n")
         if len(log.lines) > _MAX_LOG_LINES:
-            retained = log.as_string().splitlines()[-(_MAX_LOG_LINES // 2):]
+            retained = log.as_string().splitlines()[-(_MAX_LOG_LINES // 2) :]
             log.clear()
             log.write("# (older log truncated)\n" + "\n".join(retained) + "\n")
     except Exception:  # noqa: BLE001
@@ -114,6 +238,8 @@ def clear_exec_log():
         return False
     log.clear()
     return True
+
+
 # ── Exec timeout (sys.settrace) ───────────────────────────
 
 
@@ -379,7 +505,7 @@ def _handle_command(command, params):
 
 
 def _process_pending():
-    global _exec_busy
+    global _exec_busy, _current_exec_request_id, _blocked_request_id
     if not _running:
         return None
 
@@ -388,38 +514,71 @@ def _process_pending():
         _pending.clear()
 
     for raw_json, event, holder in batch:
+        command = ""
+        request_id = None
+        execute_started = False
         try:
             # raw_json は _client_handler が peek 済み（不正 JSON はここへ来ない）
             msg = json.loads(raw_json)
             command = msg.get("command", "")
             params = msg.get("params", {})
+            request_id = msg.get("request_id")
             # request_id はプロトコル top-level。ログ用に params へも渡す
-            if isinstance(params, dict) and msg.get("request_id") is not None:
-                params.setdefault("request_id", msg["request_id"])
+            if isinstance(params, dict) and request_id is not None:
+                params.setdefault("request_id", request_id)
             if command == "execute_code":
-                # 実行してもしなくても busy は戻す——holder timeout 済みで
-                # スキップされた場合に立ちっぱなしになると、以後の execute が
-                # 全部 reject され続ける
-                try:
-                    if holder["result"] is None:
-                        holder["result"] = _handle_command(command, params)
-                finally:
+                with _pending_lock:
+                    entry = _request_journal.get(request_id)
+                    if entry is not None and not holder.get("started", False):
+                        holder["started"] = True
+                        # outcome_unknown は通信側へ返した観測事実なので、実行開始時に
+                        # running へ巻き戻さず、完了時だけ最終状態へ進める。
+                        if entry["status"] == "queued":
+                            _journal_update_locked(request_id, "running")
+                        execute_started = True
+
+                if execute_started:
+                    result = _handle_command(command, params)
+                    if request_id is not None:
+                        result["request_id"] = request_id
                     with _pending_lock:
-                        _exec_busy = False
+                        final_status = "succeeded" if result.get("ok") else "failed"
+                        error = (result.get("error") or {}).get("message")
+                        _journal_update_locked(request_id, final_status, error=error)
+                        # Accepted execute は、最終結果を client が受け取って ACK
+                        # するまで次の mutation を止める。holder timeout の有無に
+                        # 依存させないことで、client 側 timeout の race も塞ぐ。
+                        _blocked_request_id = request_id
+                        # 通信側が既に outcome_unknown を返していたら、それを
+                        # 後から上書きせず journal だけ最終状態へ進める。
+                        if holder["result"] is None:
+                            result["ack_required"] = True
+                            holder["result"] = result
             elif holder["result"] is None:
                 holder["result"] = _handle_command(command, params)
-            request_id = msg.get("request_id")
             if request_id is not None and holder["result"] is not None:
                 holder["result"]["request_id"] = request_id
         except json.JSONDecodeError as e:
             if holder["result"] is None:
                 holder["result"] = _err(f"Invalid JSON: {e}", start=time.monotonic())
         except BaseException as e:
+            if command == "execute_code" and request_id is not None:
+                with _pending_lock:
+                    _journal_update_locked(request_id, "failed", error=str(e))
+                    _blocked_request_id = request_id
             if holder["result"] is None:
                 holder["result"] = _err(
                     str(e), tb=traceback.format_exc(), start=time.monotonic()
                 )
+                if command == "execute_code" and request_id is not None:
+                    holder["result"]["request_id"] = request_id
+                    holder["result"]["ack_required"] = True
         finally:
+            if command == "execute_code":
+                with _pending_lock:
+                    _exec_busy = False
+                    if _current_exec_request_id == request_id:
+                        _current_exec_request_id = None
             event.set()
 
     return 0.05 if batch else 0.2
@@ -429,7 +588,7 @@ def _process_pending():
 
 
 def _client_handler(conn, addr):
-    global _exec_busy
+    global _exec_busy, _blocked_request_id, _current_exec_request_id
     try:
         conn.settimeout(30)
         buffer = b""
@@ -467,30 +626,101 @@ def _client_handler(conn, addr):
                     resp = _err("Invalid JSON", start=time.monotonic())
                     conn.sendall(_encode_response(resp))
                     continue
+                if not isinstance(peek, dict):
+                    resp = _err(
+                        "Request JSON must be an object", start=time.monotonic()
+                    )
+                    conn.sendall(_encode_response(resp))
+                    continue
                 if _session_token and peek.get("token") != _session_token:
                     resp = _err("Invalid session token", start=time.monotonic())
                     conn.sendall(_encode_response(resp))
                     continue
+                command = peek.get("command")
                 request_id = peek.get("request_id")
+
+                if command == "get_request_status":
+                    params = peek.get("params")
+                    operation_id = (
+                        params.get("operation_id") if isinstance(params, dict) else None
+                    )
+                    resp = _request_status_response(operation_id, time.monotonic())
+                    if request_id is not None:
+                        resp["request_id"] = request_id
+                    conn.sendall(_encode_response(resp))
+                    continue
+
+                if command == "ack_request_result":
+                    params = peek.get("params")
+                    operation_id = (
+                        params.get("operation_id") if isinstance(params, dict) else None
+                    )
+                    resp = _ack_request_result_response(operation_id, time.monotonic())
+                    if request_id is not None:
+                        resp["request_id"] = request_id
+                    conn.sendall(_encode_response(resp))
+                    continue
+
                 holder = {"result": None}
                 event = threading.Event()
 
-                if peek.get("command") == "execute_code":
-                    # 判定と投入を同じ lock 区間で行う（積まれ待ちの重複も弾く）
-                    with _pending_lock:
-                        rejected = _exec_busy
-                        if not rejected:
-                            _exec_busy = True
-                            _pending.append((raw_json, event, holder))
-                    if rejected:
+                if command == "execute_code":
+                    if not _is_uuid_string(request_id):
                         resp = _err(
-                            "A previous execute is still running in Blender — outcome "
-                            "unknown. Check scene state (get_scene_info / get_object_info) "
-                            "before retrying.",
+                            "execute_code requires a UUID string request_id",
                             start=time.monotonic(),
                         )
                         if request_id is not None:
                             resp["request_id"] = request_id
+                        conn.sendall(_encode_response(resp))
+                        continue
+
+                    # journal 判定・busy 判定・投入を同じ lock 区間で行う。
+                    with _pending_lock:
+                        existing = _request_journal.get(request_id)
+                        blocker_id = _blocked_request_id
+                        busy_id = _current_exec_request_id
+                        resp = None
+                        if existing is not None:
+                            resp = _err(
+                                f"Duplicate execute request_id: {request_id}. "
+                                "The operation was not executed again; use "
+                                "get_request_status.",
+                                start=time.monotonic(),
+                            )
+                            resp["status"] = existing["status"]
+                            resp["request_id"] = request_id
+                        elif blocker_id is not None:
+                            resp = _err(
+                                "A previous execute has an unobserved outcome. "
+                                f"Call get_request_status for {blocker_id} before "
+                                "running another execute.",
+                                start=time.monotonic(),
+                            )
+                            resp["status"] = "blocked"
+                            resp["request_id"] = request_id
+                            resp["blocker_request_id"] = blocker_id
+                        elif _exec_busy:
+                            resp = _err(
+                                "A previous execute is still running in Blender. "
+                                "Wait for it to finish before retrying.",
+                                start=time.monotonic(),
+                            )
+                            resp["status"] = "blocked"
+                            resp["request_id"] = request_id
+                            if busy_id is not None:
+                                resp["blocker_request_id"] = busy_id
+                        elif not _journal_create_locked(request_id, command):
+                            resp = _err(
+                                "Request journal is full; cannot safely track a new execute",
+                                start=time.monotonic(),
+                            )
+                            resp["request_id"] = request_id
+                        else:
+                            _exec_busy = True
+                            _current_exec_request_id = request_id
+                            _pending.append((raw_json, event, holder))
+                    if resp is not None:
                         conn.sendall(_encode_response(resp))
                         continue
                 else:
@@ -498,12 +728,28 @@ def _client_handler(conn, addr):
                         _pending.append((raw_json, event, holder))
 
                 if not event.wait(timeout=_HOLDER_TIMEOUT_S):
-                    holder["result"] = _err(
-                        f"Timed out waiting for main thread ({_HOLDER_TIMEOUT_S}s)",
-                        start=time.monotonic(),
-                    )
-                    if request_id is not None:
-                        holder["result"]["request_id"] = request_id
+                    with _pending_lock:
+                        # Completion can race the wait boundary. Prefer the real
+                        # result if it became available before this lock was taken.
+                        if holder["result"] is None:
+                            if command == "execute_code":
+                                holder["result"] = _err(
+                                    f"Timed out waiting for main thread "
+                                    f"({_HOLDER_TIMEOUT_S}s). Outcome unknown; call "
+                                    f"get_request_status for {request_id}.",
+                                    start=time.monotonic(),
+                                )
+                                holder["result"]["status"] = "outcome_unknown"
+                                _journal_update_locked(request_id, "outcome_unknown")
+                                _blocked_request_id = request_id
+                            else:
+                                holder["result"] = _err(
+                                    f"Timed out waiting for main thread "
+                                    f"({_HOLDER_TIMEOUT_S}s)",
+                                    start=time.monotonic(),
+                                )
+                            if request_id is not None:
+                                holder["result"]["request_id"] = request_id
 
                 try:
                     resp_bytes = _encode_response(holder["result"])
@@ -544,6 +790,7 @@ def _client_handler(conn, addr):
         with _conns_lock:
             _client_conns.discard(conn)
 
+
 def _remove_own_token_file():
     try:
         with open(_TOKEN_FILE, encoding="utf-8") as f:
@@ -562,7 +809,6 @@ def _clean_viewport_screenshots():
         pass
 
 
-
 def _encode_response(result):
     return (json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8")
 
@@ -571,7 +817,7 @@ def _encode_response(result):
 
 
 def _server_loop():
-    global _server_socket, _running
+    global _server_socket, _running, _ready
     try:
         _server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if sys.platform == "win32":
@@ -587,11 +833,16 @@ def _server_loop():
                 os.chmod(_TMP_DIR, 0o700)
             fd = os.open(_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
-                os.write(fd, _session_token.encode())
+                token_bytes = _session_token.encode()
+                if os.write(fd, token_bytes) != len(token_bytes):
+                    raise OSError("Session token was only partially written")
             finally:
                 os.close(fd)
         except OSError as e:
-            print(f"[Claude Bridge] Warning: could not write session token: {e}")
+            # The token is the authentication boundary. Do not leave a listener
+            # running when publishing it failed, even on localhost.
+            raise RuntimeError(f"Could not publish session token: {e}") from e
+        _ready = True
         _clean_viewport_screenshots()
         print(f"[Claude Bridge] Listening on {_HOST}:{_port}")
 
@@ -611,6 +862,7 @@ def _server_loop():
                 break
     except Exception as e:
         print(f"[Claude Bridge] Server error: {e}")
+        _ready = False
         _running = False
         if _server_socket:
             try:
@@ -626,7 +878,8 @@ def _server_loop():
 
 def start_server(port=_DEFAULT_PORT):
     """受け口を起動する。すでに動いていれば何もしない。"""
-    global _running, _server_thread, _session_token, _execute_code_enabled, _port, _exec_busy
+    global _running, _ready, _server_thread, _session_token, _execute_code_enabled
+    global _port, _exec_busy, _current_exec_request_id, _blocked_request_id
 
     if _running:
         print("[Claude Bridge] Already running")
@@ -638,10 +891,15 @@ def start_server(port=_DEFAULT_PORT):
     _port = port
     _execute_code_enabled = os.environ.get("CLAUDE_BRIDGE_EXECUTE", "1") != "0"
     with _pending_lock:
+        _pending.clear()
         _exec_busy = False
+        _current_exec_request_id = None
+        _blocked_request_id = None
+        _request_journal.clear()
 
     _session_token = secrets.token_hex(16)
 
+    _ready = False
     _running = True
     _server_thread = threading.Thread(target=_server_loop, daemon=True)
     _server_thread.start()
@@ -655,9 +913,11 @@ def start_server(port=_DEFAULT_PORT):
 
 def stop_server():
     """受け口を止め、待ち行列・ソケット・トークンを片付ける。"""
-    global _running, _server_socket, _session_token, _exec_busy
+    global _running, _ready, _server_socket, _session_token, _exec_busy
+    global _current_exec_request_id, _blocked_request_id
 
     was_running = _running
+    _ready = False
     _running = False
     with _conns_lock:
         for conn in _client_conns:
@@ -678,12 +938,24 @@ def stop_server():
         _server_thread.join(timeout=2)
 
     with _pending_lock:
-        for _raw, event, holder in _pending:
+        for raw_json, event, holder in _pending:
             if not event.is_set():
                 holder["result"] = _err("Bridge shutting down", start=time.monotonic())
+                try:
+                    request_id = json.loads(raw_json).get("request_id")
+                except (AttributeError, json.JSONDecodeError):
+                    request_id = None
+                if request_id is not None:
+                    holder["result"]["request_id"] = request_id
+                    _journal_update_locked(
+                        request_id, "failed", error="Bridge shutting down"
+                    )
                 event.set()
         _pending.clear()
         _exec_busy = False
+        _current_exec_request_id = None
+        _blocked_request_id = None
+        _request_journal.clear()
 
     if _server_socket:
         try:
@@ -700,5 +972,5 @@ def stop_server():
 
 
 def is_running():
-    """受け口が動いているか。UI の表示用。"""
-    return _running
+    """受け口が listen と token 公開まで完了しているか。UI の表示用。"""
+    return _running and _ready

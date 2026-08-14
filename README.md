@@ -20,14 +20,15 @@ Blender の N パネルに小さな窓を開き、いま使っている Claude C
 このリポジトリだけで完結する構成です。
 
 1. **Blender アドオン（`claude_bridge/`）** — N パネルの UI と、MCP からの操作を受ける TCP 受け口
-2. **MCP サーバー（`mcp_server/`）** — Claude Code に Blender 操作ツール 11 個（`execute_code`・`get_scene_info`・`get_doc` など。過去セッションの発言を横断検索する `search_session_history` も提供。全履歴を運ばずに数百トークンで文脈を引ける）
+2. **MCP サーバー（`mcp_server/`）** — Claude Code に Blender 操作ツール 12 個（`execute_code`・`get_scene_info`・`get_doc` など。過去セッションの発言を横断検索する `search_session_history` も提供。全履歴を運ばずに数百トークンで文脈を引ける）
 3. **あなたの Claude Code** — パネルからの依頼を受け、MCP ツールで Blender を操作
 
 - Claude Code にログイン済みなら、そのまま動きます。**追加の API キーは不要**
 - アドオンが認証情報（API キー・トークン）を読む・保存する・送信することはありません
-- パネルから起動する Claude は `--tools ""` で組み込みツールを無効化しており、使えるのは同梱 MCP のツールだけです。Claude Code のファイル操作は渡さず、scratch 専用領域への書き込み・差分編集は MCP の `write_scratch` / `edit_scratch` 経由に限定しています
+- パネルから起動する Claude は `--tools ""` で組み込みのモデル可視ツールを無効化しており、モデルに見えるツールは同梱 MCP のものだけです。hooks・plugins など別プロセスで動く仕組みの副作用までは、この指定では制限しません。Claude Code のファイル操作は渡さず、scratch 専用領域への書き込み・差分編集は MCP の `write_scratch` / `edit_scratch` 経由に限定しています
 - ただし `execute_code` は Blender 内で Python を実行するツールです（シーン操作はこれで実現しています）。Blender のプロセスができることは原理上すべてできる、という前提で使ってください。環境変数 `CLAUDE_BRIDGE_EXECUTE=0` で無効化できます
 - Python 実行には30秒の上限がありますが、Blender の重い処理（レンダ・大規模 modifier など）に入ると途中で止められず、その間 UI も応答しなくなります。固まった場合は処理完了を待つか Blender を再起動してください
+- 通信が先にタイムアウトした実行は失敗と決めつけず、操作 ID を `get_request_status` で追跡できます。結果が確定し、その状態を確認するまでは次の `execute_code` を拒否して二重実行を防ぎます（履歴は同じ Blender プロセス内だけで保持）
 - 受け口は 127.0.0.1:9877 のみ bind。接続には一時ディレクトリ経由のセッショントークンが必要です
 
 ## 必要なもの

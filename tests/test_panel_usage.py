@@ -1,5 +1,8 @@
 """_parse_stream_json — usage は最終コール単体を使う（result の合算は使わない）。"""
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from claude_bridge import panel
 
@@ -64,3 +67,83 @@ def test_empty_stdout():
     result_event, last_usage = panel._parse_stream_json("")
     assert result_event is None
     assert last_usage == {}
+
+
+def _run_with_stdout(monkeypatch, tmp_path, stdout):
+    (tmp_path / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    session_id = "11111111-1111-1111-1111-111111111111"
+    monkeypatch.setattr(
+        panel,
+        "_load_bridge",
+        lambda: {"cwd": str(tmp_path), "session_id": session_id},
+    )
+    monkeypatch.setattr(panel, "_find_claude", lambda _bridge: "claude")
+    monkeypatch.setattr(
+        panel.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=stdout, stderr="", returncode=0
+        ),
+    )
+
+    panel._run_claude("prompt")
+    return panel._result_box
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (
+            {
+                "cache_read_input_tokens": 10,
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 5,
+            },
+            "キャッシュ再利用 10 / 新規 7",
+        ),
+        (
+            {
+                "cache_read_input_tokens": 0,
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+            "キャッシュ再利用 0 / 新規 0",
+        ),
+        ({"cache_read_input_tokens": 9}, "キャッシュ再利用 9 / 新規 0"),
+        ({"input_tokens": 3}, "キャッシュ再利用 0 / 新規 3"),
+        (
+            {"cache_creation_input_tokens": 4},
+            "キャッシュ再利用 0 / 新規 4",
+        ),
+    ],
+)
+def test_run_claude_displays_last_usage_with_regular_and_cache_creation_input(
+    monkeypatch, tmp_path, usage, expected
+):
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "assistant", "message": {"usage": usage}}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "result": "done",
+                    "is_error": False,
+                    "session_id": "11111111-1111-1111-1111-111111111111",
+                }
+            ),
+        ]
+    )
+
+    result = _run_with_stdout(monkeypatch, tmp_path, stdout)
+
+    assert result["ready"] is True
+    assert result["error"] is False
+    assert result["usage"] == expected
+
+
+def test_run_claude_marks_missing_result_event_as_error(monkeypatch, tmp_path):
+    result = _run_with_stdout(monkeypatch, tmp_path, _assistant(100, 50))
+
+    assert result["ready"] is True
+    assert result["error"] is True
+    assert "result イベント" in result["text"]

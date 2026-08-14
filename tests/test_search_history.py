@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -328,3 +330,60 @@ def test_excerpt_windows_around_the_first_term_and_flattens_newlines(history):
     assert "maintoken" in windowed[0]
     assert "othertoken" not in windowed[0]
     assert len(windowed[0]) <= 200
+
+
+@pytest.mark.parametrize("configured_value", [None, ""])
+def test_history_root_falls_back_to_home_claude_when_config_is_unset_or_empty(
+    tmp_path, configured_value
+):
+    env = os.environ.copy()
+    if configured_value is None:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = configured_value
+    env["TEST_CLAUDE_HOME"] = str(tmp_path / "home")
+    code = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path.cwd() / 'mcp_server'))\n"
+        "Path.home = classmethod(lambda cls: Path(os.environ['TEST_CLAUDE_HOME']))\n"
+        "from mcp_server import server\n"
+        "print(server._PROJECTS_ROOT)\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+
+    assert Path(completed.stdout.strip()) == tmp_path / "home" / ".claude" / "projects"
+
+
+def test_history_root_uses_nonempty_claude_config_dir(tmp_path):
+    env = os.environ.copy()
+    config_root = tmp_path / "custom-claude"
+    env["CLAUDE_CONFIG_DIR"] = str(config_root)
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path.cwd() / 'mcp_server'))\n"
+        "from mcp_server import server\n"
+        "print(server._PROJECTS_ROOT)\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+
+    assert Path(completed.stdout.strip()) == config_root / "projects"

@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from mcp_server import server
@@ -47,9 +49,14 @@ def test_bridge_error_includes_traceback_only_when_present():
 def test_write_then_edit_scratch_requires_a_unique_match(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_SCRATCH_DIR", str(tmp_path / "scratch"))
 
-    server.write_scratch("script.py", "value = 1\n")
-    assert "Updated" in server.edit_scratch("script.py", "value = 1", "value = 2")
-    assert (tmp_path / "scratch" / "script.py").read_text(encoding="utf-8") == "value = 2\n"
+    path = tmp_path / "scratch" / "script.py"
+    assert server.write_scratch("script.py", "value = 1\n") == (
+        f"Wrote {path.resolve()} (10 bytes)"
+    )
+    assert server.edit_scratch("script.py", "value = 1", "value = 2") == (
+        f"Updated {path.resolve()} (replaced 1 unique match)"
+    )
+    assert path.read_text(encoding="utf-8") == "value = 2\n"
 
     with pytest.raises(RuntimeError, match="found 0"):
         server.edit_scratch("script.py", "missing", "anything")
@@ -57,3 +64,32 @@ def test_write_then_edit_scratch_requires_a_unique_match(tmp_path, monkeypatch):
     server.write_scratch("repeated.py", "same\nsame\n")
     with pytest.raises(RuntimeError, match="found 2"):
         server.edit_scratch("repeated.py", "same", "different")
+
+
+def _make_symlink_or_skip(link, target):
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlinks are unavailable: {error}")
+
+
+@pytest.mark.parametrize("operation", ["write", "edit"])
+def test_scratch_mutations_reject_existing_symlink_without_changing_target(
+    tmp_path, monkeypatch, operation
+):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    target = tmp_path / "outside.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    link = scratch / "linked.py"
+    _make_symlink_or_skip(link, target)
+    monkeypatch.setattr(server, "_SCRATCH_DIR", str(scratch))
+
+    with pytest.raises(RuntimeError):
+        if operation == "write":
+            server.write_scratch("linked.py", "value = 2\n")
+        else:
+            server.edit_scratch("linked.py", "value = 1", "value = 2")
+
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == "value = 1\n"

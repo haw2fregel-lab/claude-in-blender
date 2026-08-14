@@ -12,7 +12,10 @@ from mcp.types import ImageContent, TextContent
 from bridge import BlenderBridge
 
 _SCRATCH_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender", "scratch")
-_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+_CLAUDE_CONFIG_DIR = Path(
+    os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
+)
+_PROJECTS_ROOT = _CLAUDE_CONFIG_DIR / "projects"
 
 mcp = FastMCP(
     "claude-in-blender",
@@ -50,8 +53,11 @@ mcp = FastMCP(
         " get_object_info) to learn the state, then write the"
         " straight-line action script against the confirmed"
         " conditions.\n\n"
-        "When a timeout or still-running error occurs, do not retry blindly."
-        " First use get_scene_info or get_object_info to verify the actual scene state before continuing."
+        "When execute_code times out with outcome_unknown, do not retry."
+        " First call get_request_status with the returned request ID."
+        " A new execute remains blocked until that request reaches succeeded"
+        " or failed and its final status is observed. Use scene-info tools"
+        " afterward when you also need to verify the resulting Blender state."
     ),
 )
 bridge = BlenderBridge()
@@ -66,19 +72,63 @@ def _bridge_error(result: dict) -> RuntimeError:
     error = result.get("error") or {}
     msg = error.get("message", "Unknown error")
     tb = error.get("traceback")
+    if result.get("status") == "outcome_unknown" and result.get("request_id"):
+        request_id = result["request_id"]
+        guidance = f"Call get_request_status({request_id!r}) before another execute."
+        if guidance not in msg:
+            msg = f"{msg}\n{guidance}"
     return RuntimeError(f"{msg}\n{tb}" if tb else msg)
 
 
 def _validate_scratch_name(name: str) -> str:
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", name) or ".." in name:
-        raise RuntimeError("Scratch file name must use only A-Z, a-z, 0-9, ., _, or - and not contain '..'")
+    if (
+        not isinstance(name, str)
+        or not re.fullmatch(r"[A-Za-z0-9._-]+", name)
+        or ".." in name
+    ):
+        raise RuntimeError(
+            "Scratch file name must use only A-Z, a-z, 0-9, ., _, or - and not contain '..'"
+        )
     if not name.endswith(".py"):
         raise RuntimeError("Scratch file name must end with .py")
     return name
 
 
 def _scratch_file_error(path: str) -> RuntimeError:
-    return RuntimeError(f"Only .py files under scratch ({_SCRATCH_DIR}) can be executed: {path}")
+    return RuntimeError(
+        f"Only .py files under scratch ({_SCRATCH_DIR}) can be executed: {path}"
+    )
+
+
+def _reject_scratch_symlink(path: Path) -> None:
+    if path.is_symlink():
+        raise RuntimeError(
+            f"Cannot write scratch file: refusing to overwrite symlink: {path}"
+        )
+
+
+def _write_scratch_file(path: Path, content: str) -> None:
+    temp_path = None
+    try:
+        _reject_scratch_symlink(path)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(content)
+        # os.replace never follows the destination symlink. The pre-check gives
+        # callers a clear refusal for an existing symlink; replacement stays safe
+        # if one appears before this atomic swap.
+        os.replace(temp_path, path)
+        temp_path = None
+    except OSError as e:
+        raise RuntimeError(f"Cannot write scratch file: {e}") from e
+    finally:
+        if temp_path is not None:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _resolve_scratch_file(path: str) -> Path:
@@ -111,7 +161,9 @@ def _message_text(record: dict) -> str:
     return "".join(
         block["text"]
         for block in content
-        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
     )
 
 
@@ -119,7 +171,11 @@ def _session_timestamp(value: object) -> str:
     if not isinstance(value, str):
         return "--/-- --:--"
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%m/%d %H:%M")
+        return (
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            .astimezone()
+            .strftime("%m/%d %H:%M")
+        )
     except (OSError, OverflowError, ValueError):
         return "--/-- --:--"
 
@@ -136,6 +192,22 @@ def _session_excerpt(text: str, query_word: str) -> str:
 def get_bridge_status() -> str:
     """Check if Blender is connected and the bridge addon is running."""
     result = bridge.send("ping")
+    if not result.get("ok"):
+        raise _bridge_error(result)
+    return _fmt(result)
+
+
+@mcp.tool()
+def get_request_status(request_id: str) -> str:
+    """Get the tracked status of an execute_code request.
+
+    Use this first when execute_code reports outcome_unknown. A final succeeded
+    or failed response acknowledges the result and permits the next execute.
+
+    Args:
+        request_id: Request ID returned by the timed-out execute_code call
+    """
+    result = bridge.send("get_request_status", {"operation_id": request_id})
     if not result.get("ok"):
         raise _bridge_error(result)
     return _fmt(result)
@@ -185,10 +257,7 @@ def write_scratch(name: str, content: str) -> str:
     name = _validate_scratch_name(name)
     os.makedirs(_SCRATCH_DIR, exist_ok=True)
     path = Path(_SCRATCH_DIR) / name
-    try:
-        path.write_text(content, encoding="utf-8")
-    except OSError as e:
-        raise RuntimeError(f"Cannot write scratch file: {e}") from e
+    _write_scratch_file(path, content)
     return f"Wrote {path.resolve()} ({len(content.encode('utf-8'))} bytes)"
 
 
@@ -198,16 +267,14 @@ def edit_scratch(name: str, old: str, new: str) -> str:
     name = _validate_scratch_name(name)
     path = Path(_SCRATCH_DIR) / name
     try:
+        _reject_scratch_symlink(path)
         content = path.read_text(encoding="utf-8")
     except OSError as e:
         raise RuntimeError(f"Cannot read scratch file: {e}") from e
     matches = content.count(old)
     if matches != 1:
         raise RuntimeError(f"Expected one match for old text, found {matches}")
-    try:
-        path.write_text(content.replace(old, new, 1), encoding="utf-8")
-    except OSError as e:
-        raise RuntimeError(f"Cannot write scratch file: {e}") from e
+    _write_scratch_file(path, content.replace(old, new, 1))
     return f"Updated {path.resolve()} (replaced 1 unique match)"
 
 
@@ -386,7 +453,9 @@ def search_session_history(query: str, max_results: int = 8) -> str:
 
         excerpts = []
         excerpt_length = 0
-        for _, path in sorted(session_files, key=lambda item: item[0], reverse=True)[:10]:
+        for _, path in sorted(session_files, key=lambda item: item[0], reverse=True)[
+            :10
+        ]:
             try:
                 with path.open(encoding="utf-8") as f:
                     lines = f.readlines()
@@ -398,7 +467,10 @@ def search_session_history(query: str, max_results: int = 8) -> str:
                     record = json.loads(line)
                 except (TypeError, ValueError):
                     continue
-                if not isinstance(record, dict) or record.get("type") not in {"user", "assistant"}:
+                if not isinstance(record, dict) or record.get("type") not in {
+                    "user",
+                    "assistant",
+                }:
                     continue
                 if record.get("isMeta"):
                     continue
