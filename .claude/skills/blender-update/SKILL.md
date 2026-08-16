@@ -11,7 +11,8 @@ description: 開発中のアドオンを実機 Blender に反映するホット�
 
 ## 1. ビルド
 
-`python tools/build_extension.py` を実行。出力された zip のパスとバージョンを控える。
+`python tools/build_extension.py` を実行。出力された zip の絶対パスを控える。
+（バージョン番号は控えても確認には使えない——手順 3 を見て。）
 
 ## 2. ホットリロード
 
@@ -58,9 +59,25 @@ result = "update scheduled"
 
 ## 3. 確認
 
-数秒おいて `get_bridge_status` を叩き、`addon_version` が
-manifest のバージョンと一致することを確認する。
-上がっていなければ、もう一度 2 を実行（それでもダメなら Blender 再起動が確実）。
+数秒おいて `get_bridge_status` を叩く。返ってくれば橋は生きている。
+ただし **`addon_version` は更新された証拠にならない**——このリポは未公開のうち 0.x で、
+番号は節目（tag / changelog）の札。中身だけ変えてバージョン据え置きの更新が普通に起きる。
+番号が一致していても、それは最初から一致していただけかもしれない。
+
+証拠は、**今回入れた変更にしかない名前**で取る。反映したい diff から
+新しく増えた関数・定数を一つ選び、実機のモジュールが持っているか見る。
+
+```python
+import sys
+m = sys.modules.get("bl_ext.user_default.claude_bridge.bridge_server")
+result = {"loaded": m is not None, "has_mark": hasattr(m, "<新版だけが持つ名前>")}
+```
+
+新版の名前を選ぶには `git show <commit> -- claude_bridge/bridge_server.py`
+を `^\+(def |class |[A-Z_]+ =)` で絞ると早い（未コミットなら `git diff` で同じ）。
+`panel.py` を変えたなら、そちらのモジュールを見る。
+
+印が付いていなければ、もう一度 2 を実行（それでもダメなら Blender 再起動が確実）。
 更新後に橋が死んで戻したい場合は、`git stash` 等で旧版の作業樹に戻して `python tools/build_extension.py` で旧 zip を作り、Blender の Install from Disk で入れ直す（このリポは git 管理なので旧版 zip はいつでも再現できる）。
 
 ## MCP が使えない場合
