@@ -262,6 +262,74 @@ def test_successful_fork_stores_the_new_session_and_drops_fork_from(
 
 
 @pytest.mark.parametrize(
+    ("stored", "expects_model"),
+    [
+        pytest.param({"model": "sonnet"}, True, id="fresh-session-gets-model"),
+        pytest.param(
+            {"model": "sonnet", "fork_from": _FORK_SOURCE},
+            True,
+            id="fork-gets-model",
+        ),
+        pytest.param(
+            {"model": "sonnet", "session_id": _STORED_SESSION},
+            False,
+            id="resume-never-switches-model",
+        ),
+        pytest.param({}, False, id="no-model-no-flag"),
+    ],
+)
+def test_model_flag_only_on_session_creating_sends(
+    bridge_file, tmp_path, monkeypatch, stored, expects_model
+):
+    cwd = _project_cwd(tmp_path)
+    _write_bridge(bridge_file, cwd, **stored)
+    calls = _stub_claude_run(monkeypatch, _result_line(_NEW_SESSION))
+
+    panel._run_claude("塔を生やして")
+
+    cmd = calls[-1]
+    if expects_model:
+        assert cmd[cmd.index("--model") + 1] == "sonnet"
+    else:
+        assert "--model" not in cmd
+
+
+def test_save_model_sets_and_default_clears_the_key(bridge_file, tmp_path):
+    cwd = _project_cwd(tmp_path)
+    _write_bridge(bridge_file, cwd, session_id=_STORED_SESSION)
+
+    assert panel._save_model("sonnet") is True
+    data = json.loads(bridge_file.read_text(encoding="utf-8"))
+    assert data["model"] == "sonnet"
+    assert data["session_id"] == _STORED_SESSION
+
+    assert panel._save_model("default") is True
+    data = json.loads(bridge_file.read_text(encoding="utf-8"))
+    assert "model" not in data
+
+
+def test_save_model_rejects_broken_bridge_root(bridge_file):
+    bridge_file.parent.mkdir(parents=True)
+    bridge_file.write_text("[]\n", encoding="utf-8")
+
+    assert panel._save_model("sonnet") is False
+    assert bridge_file.read_text(encoding="utf-8") == "[]\n"
+
+
+@pytest.mark.parametrize(
+    ("bridge", "expected"),
+    [
+        (None, "既定"),
+        ({}, "既定"),
+        ({"model": "sonnet"}, "Sonnet"),
+        ({"model": "claude-fable-5"}, "claude-fable-5"),
+    ],
+)
+def test_model_label_maps_aliases_and_passes_unknown_through(bridge, expected):
+    assert panel._model_label(bridge) == expected
+
+
+@pytest.mark.parametrize(
     "replacement", [_OTHER_FORK, None], ids=["replaced", "cleared"]
 )
 def test_save_is_skipped_when_fork_from_moves_during_the_run(

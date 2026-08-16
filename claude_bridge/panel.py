@@ -194,6 +194,54 @@ def _save_session_id(session_id, expected_cwd=None,
         return False
 
 
+# --model に渡すのは世代で腐らないエイリアスだけ。フル名を使いたい時は
+# bridge ファイルの "model" を直接編集すれば、表示も送信もそのまま通る。
+_MODEL_ITEMS = (
+    ("default", "既定", "Claude Code の既定モデルで送る"),
+    ("fable", "Fable", "最新の Fable（エイリアス指定）"),
+    ("opus", "Opus", "最新の Opus（エイリアス指定）"),
+    ("sonnet", "Sonnet", "最新の Sonnet（エイリアス指定）"),
+    ("haiku", "Haiku", "最新の Haiku（エイリアス指定）"),
+)
+
+
+def _model_label(bridge):
+    """bridge の model 値をパネル表示名にする。未知の値は素通しで見せる。"""
+    value = (bridge or {}).get("model")
+    if not value:
+        return "既定"
+    for ident, label, _desc in _MODEL_ITEMS:
+        if ident == value:
+            return label
+    return value
+
+
+def _save_model(model):
+    """bridge の model を置き換える。default / 空は「指定なし」としてキーを消す。"""
+    bridge_file = _bridge_file()
+    try:
+        with _bridge_file_lock, _lock_bridge_file(bridge_file):
+            data = _load_bridge()
+            if data is None:
+                # 壊れた root は拒否。未登録ファイルの新規作成は手動操作として許す
+                # （_save_session_id と同じ線引き）。
+                if bridge_file.exists():
+                    return False
+                data = {}
+            data = dict(data)
+            if model and model != "default":
+                data["model"] = model
+            else:
+                data.pop("model", None)
+            temp_file = bridge_file.with_suffix(".json.tmp")
+            temp_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(temp_file, bridge_file)
+            return True
+    except OSError:
+        return False
+
+
 def _project_slug(cwd):
     """Claude Code の projects ディレクトリ名（英数字以外を - に置換）。"""
     return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
@@ -328,13 +376,20 @@ def _run_claude(full_prompt):
         return
     # fork_from があれば写しを作り、session_id のみなら継続 (-r) する。
     # 新規または fork の場合は応答の session_id を保存して、次の送信から続きになる。
+    # --model が付くのは新しいセッションが生まれる送信（新規・fork 初回）だけ。
+    # 写しは文脈を引き継ぐがモデルは選び直せる。継続は育ったセッションに従う。
     cmd = [claude]
     session_id = bridge.get("session_id")
     fork_from = bridge.get("fork_from")
+    model = bridge.get("model")
     if fork_from:
         cmd += ["-r", fork_from, "--fork-session"]
+        if model:
+            cmd += ["--model", model]
     elif session_id:
         cmd += ["-r", session_id]
+    elif model:
+        cmd += ["--model", model]
     # MCP はこのリポの1台だけに絞り、組み込みツールは無効化する。
     # グローバル設定の MCP まで毎回 spawn すると起動が数秒重くなる
     # （実測で 6.1s → 4.2s）。scratch の書き込み・差分編集は MCP 側で担う。
@@ -529,6 +584,21 @@ class CLAUDE_OT_pick_session(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDE_OT_pick_model(bpy.types.Operator):
+    bl_idname = "claude.pick_model"
+    bl_label = "モデルを選ぶ"
+    bl_description = "新しいセッションを受け持つモデル（新規送信・写しの初回送信で効く）"
+
+    model: bpy.props.EnumProperty(items=_MODEL_ITEMS)
+
+    def execute(self, context):
+        if _save_model(self.model):
+            self.report({"INFO"}, "モデル: " + _model_label(_load_bridge()))
+        else:
+            self.report({"ERROR"}, "登録ファイルを書けなかった")
+        return {"FINISHED"}
+
+
 class CLAUDE_OT_disconnect_session(bpy.types.Operator):
     bl_idname = "claude.disconnect_session"
     bl_label = "接続を解除"
@@ -571,6 +641,13 @@ class CLAUDE_PT_panel(bpy.types.Panel):
                 label += "（写し待ち）"
             row.label(text=label, icon="LINKED")
             row.operator("claude.disconnect_session", text="", icon="X")
+            if fork_from:
+                # 写しがまだ生まれてない間だけ、写しを受け持つモデルを選べる
+                mrow = layout.row()
+                mrow.enabled = not is_working
+                mrow.operator_menu_enum(
+                    "claude.pick_model", "model",
+                    text="モデル: " + _model_label(bridge))
         else:
             # cwd だけある: 既存セッションを選ぶか、新規のまま送るか
             layout.label(text="セッション未接続", icon="UNLINKED")
@@ -587,6 +664,12 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             box.operator("claude.refresh_sessions",
                          text="一覧を読み込む" if not cache_ok else "更新",
                          icon="FILE_REFRESH")
+            # 新規セッションで送る時に受け持つモデル
+            mrow = layout.row()
+            mrow.enabled = not is_working
+            mrow.operator_menu_enum(
+                "claude.pick_model", "model",
+                text="モデル: " + _model_label(bridge))
         if bridge_server.is_running():
             layout.label(text="受け口: 稼働中", icon="CHECKMARK")
         else:
@@ -637,7 +720,7 @@ class CLAUDE_PT_panel(bpy.types.Panel):
 
 classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_OT_clear_log,
            CLAUDE_OT_refresh_sessions, CLAUDE_OT_pick_session,
-           CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
+           CLAUDE_OT_pick_model, CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
 
 _WM_PROPS = ("claude_bridge_prompt", "claude_bridge_status",
              "claude_bridge_reply", "claude_bridge_usage",
