@@ -339,8 +339,8 @@ def test_save_fork_from_rejects_broken_bridge_root(bridge_file):
 @pytest.mark.parametrize(
     ("bridge", "expected"),
     [
-        (None, "既定"),
-        ({}, "既定"),
+        (None, "Claude Code default"),
+        ({}, "Claude Code default"),
         ({"model": "sonnet"}, "Sonnet"),
         ({"model": "claude-fable-5"}, "claude-fable-5"),
     ],

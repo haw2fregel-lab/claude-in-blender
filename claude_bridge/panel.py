@@ -31,14 +31,14 @@ _EXPECTED_SESSION_UNSET = object()
 # チェックした分だけ「これを使ってから作業して」が依頼の頭に乗る。
 # description に指示文そのものを入れてあるので、ホバーで何が送られるか見える。
 _CTX_TOGGLES = (
-    ("claude_bridge_ctx_selection", "選択中を対象",
-     "まず get_selection で選択中のものを確認し、それを作業対象にしてください。"),
-    ("claude_bridge_ctx_scene", "シーン情報",
-     "作業前に get_scene_info / get_object_info でシーンの実データを確認してください。"),
-    ("claude_bridge_ctx_doc", "ドキュメント",
-     "作業前に get_doc で使う API のドキュメントを確認してください。"),
-    ("claude_bridge_ctx_screenshot", "スクショ",
-     "作業前に get_viewport_screenshot でビューポートの見た目を確認してください。"),
+    ("claude_bridge_ctx_selection", "Selection",
+     "Target the current selection (get_selection)."),
+    ("claude_bridge_ctx_scene", "Scene info",
+     "Check the scene first (get_scene_info / get_object_info)."),
+    ("claude_bridge_ctx_doc", "Docs",
+     "Look up the API docs first (get_doc)."),
+    ("claude_bridge_ctx_screenshot", "Screenshot",
+     "Check a viewport screenshot first (get_viewport_screenshot)."),
 )
 
 # ワーカースレッド → メインスレッド(timer) の受け渡し箱。
@@ -197,11 +197,13 @@ def _save_session_id(session_id, expected_cwd=None,
 # --model に渡すのは世代で腐らないエイリアスだけ。フル名を使いたい時は
 # bridge ファイルの "model" を直接編集すれば、表示も送信もそのまま通る。
 _MODEL_ITEMS = (
-    ("default", "既定", "Claude Code の既定モデルで送る"),
-    ("fable", "Fable", "最新の Fable（エイリアス指定）"),
-    ("opus", "Opus", "最新の Opus（エイリアス指定）"),
-    ("sonnet", "Sonnet", "最新の Sonnet（エイリアス指定）"),
-    ("haiku", "Haiku", "最新の Haiku（エイリアス指定）"),
+    # "Default" 単体は Blender 本体の翻訳辞書に載っていて「デフォルト」に化ける
+    # （enum item は translate=False が届かない）。辞書に無い語を使う。
+    ("default", "Claude Code default", "Send with Claude Code's default model"),
+    ("fable", "Fable", "Latest Fable (alias)"),
+    ("opus", "Opus", "Latest Opus (alias)"),
+    ("sonnet", "Sonnet", "Latest Sonnet (alias)"),
+    ("haiku", "Haiku", "Latest Haiku (alias)"),
 )
 
 
@@ -209,7 +211,7 @@ def _model_label(bridge):
     """bridge の model 値をパネル表示名にする。未知の値は素通しで見せる。"""
     value = (bridge or {}).get("model")
     if not value:
-        return "既定"
+        return "Claude Code default"
     for ident, label, _desc in _MODEL_ITEMS:
         if ident == value:
             return label
@@ -306,7 +308,7 @@ def _first_user_message(path, max_lines=30):
                                 return b["text"].strip()
     except OSError:
         pass
-    return "(発言なし)"
+    return "(no messages)"
 
 
 def _load_sessions(cwd, limit=5):
@@ -376,15 +378,15 @@ def _run_claude(full_prompt):
     bridge = _load_bridge()
     if not bridge:
         _result_box = {"ready": True, "error": True,
-                       "text": "未セットアップ: Claude Code で /blender-setup を実行してね"}
+                       "text": "Not set up: run /blender-setup in Claude Code"}
         return
     cwd = bridge.get("cwd")
     if not cwd:
         _result_box = {
             "ready": True,
             "error": True,
-            "text": ".mcp.json が見つからない（セットアップ作業ディレクトリが未設定）。"
-                    "リポを移動した場合は Claude Code で /blender-setup をやり直してね",
+            "text": ".mcp.json not found (setup directory not registered). "
+                    "If the repo moved, run /blender-setup again in Claude Code",
         }
         return
     mcp_config = Path(cwd) / ".mcp.json"
@@ -392,13 +394,13 @@ def _run_claude(full_prompt):
         _result_box = {
             "ready": True,
             "error": True,
-            "text": f".mcp.json が見つからない（{mcp_config}）。"
-                    "リポを移動した場合は Claude Code で /blender-setup をやり直してね",
+            "text": f".mcp.json not found ({mcp_config}). "
+                    "If the repo moved, run /blender-setup again in Claude Code",
         }
         return
     claude = _find_claude(bridge)
     if not claude:
-        _result_box = {"ready": True, "error": True, "text": "claude コマンドが見つからない"}
+        _result_box = {"ready": True, "error": True, "text": "claude command not found"}
         return
     # fork_from があれば写しを作り、session_id のみなら継続 (-r) する。
     # 新規または fork の場合は応答の session_id を保存して、次の送信から続きになる。
@@ -447,7 +449,7 @@ def _run_claude(full_prompt):
             if last_usage:
                 # キャッシュ再利用=ほぼ無料で読めた分 / 新規=今回課金枠を食った分。
                 # 新規は通常入力とキャッシュ作成入力の両方である。
-                usage = "キャッシュ再利用 {:,} / 新規 {:,}".format(
+                usage = "Cache reused {:,} / new {:,}".format(
                     last_usage.get("cache_read_input_tokens") or 0,
                     ((last_usage.get("input_tokens") or 0)
                      + (last_usage.get("cache_creation_input_tokens") or 0)))
@@ -472,20 +474,20 @@ def _run_claude(full_prompt):
                     if (not current_bridge or current_bridge.get("cwd") != cwd
                             or current_bridge.get("session_id") != session_id
                             or current_bridge.get("fork_from") != fork_from):
-                        text += "\n(接続先が切り替わったため、この会話の接続先は保存しなかった)"
+                        text += "\n(connection changed elsewhere; this conversation's session was not saved)"
             if err and p.stderr:
                 text += "\n" + p.stderr[:300]
         else:
             # result イベントが来ていない = stream-json として読めない応答
-            text = "プロトコルエラー: result イベントがありません\n" + (
-                p.stdout or p.stderr or "空応答")[:500]
+            text = "Protocol error: no result event\n" + (
+                p.stdout or p.stderr or "empty response")[:500]
             err = True
             usage = ""
         _result_box = {"ready": True, "text": text, "error": err, "usage": usage}
     except subprocess.TimeoutExpired:
-        _result_box = {"ready": True, "text": "タイムアウト (300秒)", "error": True}
+        _result_box = {"ready": True, "text": "Timeout (300s)", "error": True}
     except Exception as e:  # noqa: BLE001 - 試作: 何が起きても箱に入れて UI に見せる
-        _result_box = {"ready": True, "text": f"実行エラー: {e}", "error": True}
+        _result_box = {"ready": True, "text": f"Execution error: {e}", "error": True}
 
 
 def _poll_result():
@@ -513,7 +515,7 @@ def _tag_redraw():
 # 送信文の先頭に付く出所ラベル。役目はこの一つだけで、ユーザーの依頼文へ
 # 見えない指示を追記しない（作法系の指示は MCP サーバーの instructions が持ち、
 # あちらはリポで公開された仕様）。何が送られるかはユーザーから全部見える。
-_SEND_LABEL = "[Blender から送信]"
+_SEND_LABEL = "[Sent from Blender]"
 
 
 def _build_prompt(prompt, directives=()):
@@ -526,23 +528,23 @@ def _build_prompt(prompt, directives=()):
 
 class CLAUDE_OT_send(bpy.types.Operator):
     bl_idname = "claude.send_request"
-    bl_label = "Claude に送る"
-    bl_description = ("依頼を Claude Code のセッションに送る。"
-                      "送信文に付くのは出所ラベル「[Blender から送信]」と"
-                      "チェックしたコンテキスト指示だけ（見えない追記はしない）")
+    bl_label = "Send to Claude"
+    bl_description = ("Send the request to your Claude Code session. "
+                      "Only the source label \"[Sent from Blender]\" and "
+                      "checked context directives are added — nothing hidden")
 
     def execute(self, context):
         global _worker
         wm = context.window_manager
         if not bridge_server.is_running():
-            self.report({"ERROR"}, "受け口が停止中のため送信できない")
+            self.report({"ERROR"}, "Cannot send: bridge is not running")
             return {"CANCELLED"}
         prompt = wm.claude_bridge_prompt.strip()
         if not prompt:
-            self.report({"WARNING"}, "依頼が空だよ")
+            self.report({"WARNING"}, "Request is empty")
             return {"CANCELLED"}
         if _worker and _worker.is_alive():
-            self.report({"WARNING"}, "まだ前の依頼を処理中")
+            self.report({"WARNING"}, "Still processing the previous request")
             return {"CANCELLED"}
         # プロンプト組み立てはメインスレッドで済ませ、スレッドへは完成文字列だけ渡す
         directives = [text for prop, _label, text in _CTX_TOGGLES if getattr(wm, prop)]
@@ -558,36 +560,38 @@ class CLAUDE_OT_send(bpy.types.Operator):
 
 class CLAUDE_OT_copy_reply(bpy.types.Operator):
     bl_idname = "claude.copy_reply"
-    bl_label = "返事を全文コピー"
+    bl_label = "Copy Full Reply"
+    bl_description = "Copy the full reply to the clipboard"
 
     def execute(self, context):
         context.window_manager.clipboard = context.window_manager.claude_bridge_reply
-        self.report({"INFO"}, "コピーした")
+        self.report({"INFO"}, "Copied")
         return {"FINISHED"}
 
 
 class CLAUDE_OT_clear_log(bpy.types.Operator):
     bl_idname = "claude.clear_log"
-    bl_label = "実行ログをクリア"
+    bl_label = "Clear Execution Log"
+    bl_description = "Clear claude_bridge_log (the record of code Claude ran)"
 
     def execute(self, context):
         if bridge_server.clear_exec_log():
-            self.report({"INFO"}, "実行ログをクリアした")
+            self.report({"INFO"}, "Execution log cleared")
         else:
-            self.report({"INFO"}, "実行ログはない")
+            self.report({"INFO"}, "No execution log")
         return {"FINISHED"}
 
 
 class CLAUDE_OT_refresh_sessions(bpy.types.Operator):
     bl_idname = "claude.refresh_sessions"
-    bl_label = "一覧を更新"
-    bl_description = "このプロジェクトの直近セッションを読み直す"
+    bl_label = "Refresh List"
+    bl_description = "Reload this project's recent sessions"
 
     def execute(self, context):
         bridge = _load_bridge() or {}
         cwd = bridge.get("cwd")
         if not cwd:
-            self.report({"WARNING"}, "cwd 未登録")
+            self.report({"WARNING"}, "cwd not registered")
             return {"CANCELLED"}
         _session_cache["cwd"] = cwd
         _session_cache["items"] = _load_sessions(cwd)
@@ -597,9 +601,9 @@ class CLAUDE_OT_refresh_sessions(bpy.types.Operator):
 
 class CLAUDE_OT_pick_session(bpy.types.Operator):
     bl_idname = "claude.pick_session"
-    bl_label = "このセッションの写しから始める"
-    bl_description = ("選んだセッションの写し (fork) をパネル専用セッションとして育てる。"
-                      "元の会話には書き込まない")
+    bl_label = "Start from a Fork of This Session"
+    bl_description = ("Grow a fork of the selected session as the panel's own. "
+                      "Nothing is appended to the original conversation")
 
     session_id: bpy.props.StringProperty()
 
@@ -607,37 +611,37 @@ class CLAUDE_OT_pick_session(bpy.types.Operator):
         # 継続 (-r) 直結は作らない: デスクトップ育ちの履歴へパネル構成で
         # 書き込むと、会話が混線しキャッシュも毎回プレフィックス不一致になる。
         if _save_fork_from(self.session_id):
-            self.report({"INFO"}, "写し元: ..." + self.session_id[-8:])
+            self.report({"INFO"}, "Fork source: ..." + self.session_id[-8:])
         else:
-            self.report({"ERROR"}, "登録ファイルを書けなかった")
+            self.report({"ERROR"}, "Could not write the bridge file")
         return {"FINISHED"}
 
 
 class CLAUDE_OT_pick_model(bpy.types.Operator):
     bl_idname = "claude.pick_model"
-    bl_label = "モデルを選ぶ"
-    bl_description = "新しいセッションを受け持つモデル（新規送信・写しの初回送信で効く）"
+    bl_label = "Select Model"
+    bl_description = "Model for new sessions (applies to new sends and a fork's first send)"
 
     model: bpy.props.EnumProperty(items=_MODEL_ITEMS)
 
     def execute(self, context):
         if _save_model(self.model):
-            self.report({"INFO"}, "モデル: " + _model_label(_load_bridge()))
+            self.report({"INFO"}, "Model: " + _model_label(_load_bridge()))
         else:
-            self.report({"ERROR"}, "登録ファイルを書けなかった")
+            self.report({"ERROR"}, "Could not write the bridge file")
         return {"FINISHED"}
 
 
 class CLAUDE_OT_disconnect_session(bpy.types.Operator):
     bl_idname = "claude.disconnect_session"
-    bl_label = "接続を解除"
-    bl_description = "セッションの接続を解除する（登録した cwd は残るので、選び直しや新規送信はできる）"
+    bl_label = "Disconnect"
+    bl_description = "Disconnect the session (cwd stays registered; pick another or send as new)"
 
     def execute(self, context):
         if _save_session_id(None, clear_fork_from=True):
-            self.report({"INFO"}, "接続を解除した")
+            self.report({"INFO"}, "Disconnected")
         else:
-            self.report({"ERROR"}, "登録ファイルを書けなかった")
+            self.report({"ERROR"}, "Could not write the bridge file")
         return {"FINISHED"}
 
 
@@ -648,6 +652,8 @@ class CLAUDE_PT_panel(bpy.types.Panel):
     bl_category = "Claude"
 
     def draw(self, context):
+        # パネルは英語固定。Blender の UI 翻訳は本体辞書にある語（Selection 等）だけを
+        # 部分翻訳して英日混在の表示になるため、全表示を translate=False で辞書に通さない。
         wm = context.window_manager
         layout = self.layout
         bridge = _load_bridge()
@@ -659,16 +665,16 @@ class CLAUDE_PT_panel(bpy.types.Panel):
         is_working = status == "WORKING"
         if not connection_id and not cwd:
             # 完全初期状態: 案内だけ出して終わり
-            layout.label(text="未セットアップ", icon="ERROR")
-            layout.label(text="Claude Code で /blender-setup を実行してね")
+            layout.label(text="Not set up", icon="ERROR", translate=False)
+            layout.label(text="Run /blender-setup in Claude Code", translate=False)
             return
         if connection_id:
             row = layout.row(align=True)
             row.enabled = not is_working
-            label = "接続先: ..." + connection_id[-8:]
+            label = "Connected: ..." + connection_id[-8:]
             if fork_from:
-                label += "（写し待ち）"
-            row.label(text=label, icon="LINKED")
+                label += " (fork pending)"
+            row.label(text=label, icon="LINKED", translate=False)
             row.operator("claude.disconnect_session", text="", icon="X")
             if fork_from:
                 # 写しがまだ生まれてない間だけ、写しを受け持つモデルを選べる
@@ -676,53 +682,58 @@ class CLAUDE_PT_panel(bpy.types.Panel):
                 mrow.enabled = not is_working
                 mrow.operator_menu_enum(
                     "claude.pick_model", "model",
-                    text="モデル: " + _model_label(bridge))
+                    text="Model: " + _model_label(bridge), translate=False)
         else:
             # cwd だけある: 既存セッションを選ぶか、新規のまま送るか
-            layout.label(text="セッション未接続", icon="UNLINKED")
+            layout.label(text="No session connected", icon="UNLINKED", translate=False)
             box = layout.box()
             box.enabled = not is_working
-            box.label(text="写しの元を選ぶ (直近5件):")
+            box.label(text="Fork from a recent session (last 5):", translate=False)
             cache_ok = _session_cache["loaded"] and _session_cache["cwd"] == cwd
             if cache_ok:
                 for pick_id, pick_label in _session_cache["items"]:
-                    op = box.operator("claude.pick_session", text=pick_label)
+                    op = box.operator("claude.pick_session", text=pick_label,
+                                      translate=False)
                     op.session_id = pick_id
                 if not _session_cache["items"]:
-                    box.label(text="(セッションが無い — 新規で送れるよ)")
+                    box.label(text="(no sessions yet — you can send as new)",
+                              translate=False)
             box.operator("claude.refresh_sessions",
-                         text="一覧を読み込む" if not cache_ok else "更新",
-                         icon="FILE_REFRESH")
+                         text="Load list" if not cache_ok else "Refresh",
+                         icon="FILE_REFRESH", translate=False)
             # 新規セッションで送る時に受け持つモデル
             mrow = layout.row()
             mrow.enabled = not is_working
             mrow.operator_menu_enum(
                 "claude.pick_model", "model",
-                text="モデル: " + _model_label(bridge))
+                text="Model: " + _model_label(bridge), translate=False)
         if bridge_server.is_running():
-            layout.label(text="受け口: 稼働中", icon="CHECKMARK")
+            layout.label(text="Bridge: running", icon="CHECKMARK", translate=False)
         else:
-            layout.label(text="受け口: 停止", icon="X")
+            layout.label(text="Bridge: stopped", icon="X", translate=False)
         layout.prop(wm, "claude_bridge_prompt", text="")
         col = layout.column(align=True)
-        col.label(text="コンテキスト:")
+        col.label(text="Context:", translate=False)
         grid = col.grid_flow(row_major=True, columns=2, align=True)
-        for prop, _label, _text in _CTX_TOGGLES:
-            grid.prop(wm, prop)
+        for prop, label, _text in _CTX_TOGGLES:
+            grid.prop(wm, prop, text=label, translate=False)
         row = layout.row()
         row.enabled = not is_working and bridge_server.is_running()
         if connection_id:
-            row.operator("claude.send_request", icon="PLAY")
+            row.operator("claude.send_request", text="Send to Claude",
+                         icon="PLAY", translate=False)
         else:
-            row.operator("claude.send_request", text="新規セッションで送る", icon="PLAY")
+            row.operator("claude.send_request", text="Send as New Session",
+                         icon="PLAY", translate=False)
         if status == "WORKING":
-            layout.label(text="処理中... (数十秒かかるよ)", icon="SORTTIME")
+            layout.label(text="Processing... (may take tens of seconds)",
+                         icon="SORTTIME", translate=False)
         elif status == "DONE":
-            layout.label(text="完了", icon="CHECKMARK")
+            layout.label(text="Done", icon="CHECKMARK", translate=False)
         elif status == "ERROR":
-            layout.label(text="エラー", icon="ERROR")
+            layout.label(text="Error", icon="ERROR", translate=False)
         if status in ("DONE", "ERROR") and wm.claude_bridge_usage:
-            layout.label(text=wm.claude_bridge_usage)
+            layout.label(text=wm.claude_bridge_usage, translate=False)
         reply = wm.claude_bridge_reply
         if reply:
             # パネル実幅から box の余白・スクロールバーぶんを引いた幅に、実測で収める
@@ -737,14 +748,18 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             box = layout.box()
             shown_lines = lines[:8] if collapsed and len(lines) > 8 else lines
             for ln in shown_lines:
-                box.label(text=ln)
+                box.label(text=ln, translate=False)
             if collapsed and len(lines) > 8:
-                box.label(text=f"... 残り {len(lines) - 8} 行（畳むを解除で全文）")
+                box.label(text=f"... {len(lines) - 8} more lines (uncheck Collapse for all)",
+                          translate=False)
             row = layout.row(align=True)
-            row.prop(wm, "claude_bridge_collapsed", text="畳む", toggle=True)
-            row.operator("claude.copy_reply", icon="COPYDOWN")
+            row.prop(wm, "claude_bridge_collapsed", text="Collapse", toggle=True,
+                     translate=False)
+            row.operator("claude.copy_reply", text="Copy Full Reply",
+                         icon="COPYDOWN", translate=False)
         if bpy.data.texts.get("claude_bridge_log"):
-            layout.operator("claude.clear_log", icon="TRASH")
+            layout.operator("claude.clear_log", text="Clear Execution Log",
+                            icon="TRASH", translate=False)
 
 
 classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_OT_clear_log,
@@ -759,12 +774,12 @@ _WM_PROPS = ("claude_bridge_prompt", "claude_bridge_status",
 
 def register():
     bpy.types.WindowManager.claude_bridge_prompt = bpy.props.StringProperty(
-        name="依頼", description="Claude への依頼", default="")
+        name="Request", description="Request for Claude", default="")
     bpy.types.WindowManager.claude_bridge_status = bpy.props.StringProperty(default="IDLE")
     bpy.types.WindowManager.claude_bridge_reply = bpy.props.StringProperty(default="")
     bpy.types.WindowManager.claude_bridge_usage = bpy.props.StringProperty(default="")
     bpy.types.WindowManager.claude_bridge_collapsed = bpy.props.BoolProperty(
-        name="畳む", description="返事の表示を先頭8行に畳む", default=False)
+        name="Collapse", description="Collapse the reply to the first 8 lines", default=False)
     for prop, label, text in _CTX_TOGGLES:
         setattr(bpy.types.WindowManager, prop, bpy.props.BoolProperty(
             name=label, description=text, default=False))

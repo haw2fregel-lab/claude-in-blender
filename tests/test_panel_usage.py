@@ -99,7 +99,7 @@ def _run_with_stdout(monkeypatch, tmp_path, stdout):
                 "input_tokens": 2,
                 "cache_creation_input_tokens": 5,
             },
-            "キャッシュ再利用 10 / 新規 7",
+            "Cache reused 10 / new 7",
         ),
         (
             {
@@ -107,13 +107,13 @@ def _run_with_stdout(monkeypatch, tmp_path, stdout):
                 "input_tokens": 0,
                 "cache_creation_input_tokens": 0,
             },
-            "キャッシュ再利用 0 / 新規 0",
+            "Cache reused 0 / new 0",
         ),
-        ({"cache_read_input_tokens": 9}, "キャッシュ再利用 9 / 新規 0"),
-        ({"input_tokens": 3}, "キャッシュ再利用 0 / 新規 3"),
+        ({"cache_read_input_tokens": 9}, "Cache reused 9 / new 0"),
+        ({"input_tokens": 3}, "Cache reused 0 / new 3"),
         (
             {"cache_creation_input_tokens": 4},
-            "キャッシュ再利用 0 / 新規 4",
+            "Cache reused 0 / new 4",
         ),
     ],
 )
@@ -146,4 +146,4 @@ def test_run_claude_marks_missing_result_event_as_error(monkeypatch, tmp_path):
 
     assert result["ready"] is True
     assert result["error"] is True
-    assert "result イベント" in result["text"]
+    assert "no result event" in result["text"]

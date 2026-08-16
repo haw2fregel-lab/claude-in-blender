@@ -11,7 +11,7 @@ Blender パネル（claude-in-blender）に、いま話しているこのセッ�
    「このセッション」の fork 元として登録する。環境変数が無い場合だけ、cwd のプロジェクトの
    transcript のうち最新のものを fallback として使う。
 2. 出力に `(env)` が無い場合（fallback 時）のみ、fork 元の末尾8文字をユーザーに見せ、
-   Blender の N パネル「Claude」タブの「接続先: ...（写し待ち）」表示と一致することを確認してもらう。
+   Blender の N パネル「Claude」タブの「Connected: ... (fork pending)」表示と一致することを確認してもらう。
    並行セッションがあると別のセッションの写しを作ることがある——一致しなければ
    `python tools/bridge_register.py --cwd . --session-id <正しいID>` で指定し直す。
 3. パネルの初回送信で fork 元から新しいセッションが作られる。以後パネルは自分の専用線を育て、

@@ -8,13 +8,13 @@ from claude_bridge import panel
 
 def test_prompt_is_label_plus_user_text_only():
     out = panel._build_prompt("塔を生やして")
-    assert out == "[Blender から送信]\n\n塔を生やして"
+    assert out == "[Sent from Blender]\n\n塔を生やして"
 
 
 def test_directives_sit_between_label_and_user_text():
     out = panel._build_prompt("色を塗って", ["まず選択を確認", "シーンを見てから"])
     assert out == (
-        "[Blender から送信]\n"
+        "[Sent from Blender]\n"
         "- まず選択を確認\n"
         "- シーンを見てから"
         "\n\n色を塗って"
