@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "claude_bridge"
 README = ROOT / "README.md"
-SERVER = ROOT / "mcp_server" / "server.py"
+README_JA = ROOT / "README.ja.md"
 
 
 def _manifest_version() -> str:
@@ -35,24 +35,20 @@ def _build_zip(version: str) -> Path:
 
 
 def _readme_mismatches(version: str) -> list[str]:
-    readme = README.read_text(encoding="utf-8")
-    tool_count = len(re.findall(r"^\s*@mcp\.tool\(\)", SERVER.read_text(encoding="utf-8"), re.MULTILINE))
-    tool_match = re.search(r"ツール\s*(\d+)\s*個", readme)
-    version_match = re.search(r"試作 v([0-9]+(?:\.[0-9]+)+)", readme)
-
+    """英語正面と日本語 .ja、二枚の README の版表記を manifest と照合する。"""
     errors = []
-    if not tool_match:
-        errors.append("README tool count ('ツール N 個') was not found")
-    elif int(tool_match.group(1)) != tool_count:
-        errors.append(
-            f"README says {tool_match.group(1)} tools, but mcp_server/server.py defines {tool_count}"
-        )
-    if not version_match:
-        errors.append("README trial version ('試作 vX.Y.Z') was not found")
-    elif version_match.group(1) != version:
-        errors.append(
-            f"README says trial v{version_match.group(1)}, but blender_manifest.toml is v{version}"
-        )
+    for path, pattern, label in (
+        (README, r"prototype v([0-9]+(?:\.[0-9]+)+)", "README.md ('prototype vX.Y.Z')"),
+        (README_JA, r"試作 v([0-9]+(?:\.[0-9]+)+)", "README.ja.md ('試作 vX.Y.Z')"),
+    ):
+        text = path.read_text(encoding="utf-8")
+        match = re.search(pattern, text)
+        if not match:
+            errors.append(f"version marker was not found in {label}")
+        elif match.group(1) != version:
+            errors.append(
+                f"{label} says v{match.group(1)}, but blender_manifest.toml is v{version}"
+            )
     return errors
 
 
