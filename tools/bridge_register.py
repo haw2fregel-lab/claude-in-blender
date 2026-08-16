@@ -10,7 +10,8 @@
 --session-id 省略時は、まず Claude Code セッション内の
 CLAUDE_CODE_SESSION_ID を使う。環境変数が無い場合だけ、cwd のプロジェクトの
 transcript (~/.claude/projects/<slug>/*.jsonl) の最新ファイルを fallback として使う。
-fallback は並行セッションを取り違えうるため、出力の末尾8文字を Blender パネルの
+取得した ID はパネルが初回送信時に写しを作る fork 元として登録する。fallback は
+並行セッションを取り違えうるため、出力の fork 元の末尾8文字を Blender パネルの
 「接続先」表示と目で照合すること。CLAUDE_CONFIG_DIR が非空なら、その配下を使う。
 """
 import argparse
@@ -76,22 +77,22 @@ def find_claude():
 def main():
     ap = argparse.ArgumentParser(description="Blender ブリッジのセッション登録")
     ap.add_argument("--cwd", required=True, help="橋の作業ディレクトリ（.mcp.json のあるリポ）")
-    ap.add_argument("--session-id", default=None, help="接続先セッション ID（省略で自動特定）")
-    ap.add_argument("--cwd-only", action="store_true", help="cwd だけ登録（セッションは未接続のまま）")
+    ap.add_argument("--session-id", default=None, help="fork 元セッション ID（省略で自動特定）")
+    ap.add_argument("--cwd-only", action="store_true", help="cwd だけ登録（既存のセッション設定は変えない）")
     args = ap.parse_args()
 
     cwd = str(Path(args.cwd).resolve()).replace("\\", "/")
-    session_id = None
+    fork_from = None
     session_source = None
     if not args.cwd_only:
         if args.session_id:
-            session_id = args.session_id
+            fork_from = args.session_id
             session_source = "explicit"
         else:
-            session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
-            session_source = "env" if session_id else "fallback"
-            if not session_id:
-                session_id = latest_session(cwd)
+            fork_from = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+            session_source = "env" if fork_from else "fallback"
+            if not fork_from:
+                fork_from = latest_session(cwd)
 
     with lock_bridge_file(BRIDGE_FILE):
         data = {}
@@ -103,12 +104,14 @@ def main():
                 data = {}
 
         data.update({
-            "session_id": session_id,
             "cwd": cwd,
             "claude_exe": data.get("claude_exe") or find_claude(),
             "registered_at": time.strftime("%Y-%m-%d %H:%M"),
             "registered_by": "bridge_register.py",
         })
+        if not args.cwd_only:
+            data["fork_from"] = fork_from
+            data["session_id"] = None
         temp_file = BRIDGE_FILE.with_suffix(".json.tmp")
         temp_file.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -116,15 +119,17 @@ def main():
 
     print(f"registered: {BRIDGE_FILE}")
     print(f"  cwd       : {cwd}")
-    if session_id:
+    if args.cwd_only:
+        print("  session   : (変更なし)")
+    elif fork_from:
         if session_source == "env":
-            print(f"  session   : ...{session_id[-8:]}  (セッション自動特定 (env))")
+            print(f"  fork 元   : ...{fork_from[-8:]}  (セッション自動特定 (env); この ID の写しをパネル側に作る (fork))")
         elif session_source == "fallback":
-            print(f"  session   : ...{session_id[-8:]}  (パネルの「接続先」表示と照合してね)")
+            print(f"  fork 元   : ...{fork_from[-8:]}  (パネルの「接続先」表示と fork 元の末尾8文字を照合してね; この ID の写しをパネル側に作る (fork))")
         else:
-            print(f"  session   : ...{session_id[-8:]}  (明示指定)")
+            print(f"  fork 元   : ...{fork_from[-8:]}  (明示指定; この ID の写しをパネル側に作る (fork))")
     else:
-        print("  session   : (未接続 — パネル側で選択するか、新規セッションで送信)")
+        print("  fork 元   : (未指定 — パネル側で新規セッションを作って送信)")
 
 
 if __name__ == "__main__":

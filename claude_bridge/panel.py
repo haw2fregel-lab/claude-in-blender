@@ -2,7 +2,9 @@
 """N パネル — 依頼欄・コンテキストトグル・送信と応答表示。
 
 送信は `claude -r <session_id> -p "<依頼>"` を裏で実行する形。
-session_id は ~/.claude/blender-bridge-session.json (Claude Code 側が登録) から読む。
+fork_from が登録されている間は初回のみ `--fork-session` で写しを作り、
+生まれた専用セッションを session_id に保存して以後そちらを継続する。
+接続情報は ~/.claude/blender-bridge-session.json (Claude Code 側が登録) から読む。
 応答側の Claude は、このアドオンに内蔵の受け口 (bridge_server) 経由で Blender を操作する。
 """
 import json
@@ -138,21 +140,28 @@ def _load_bridge():
     return data if isinstance(data, dict) else None
 
 
-def _matches_bridge_preconditions(data, expected_cwd, expected_session_id):
+def _matches_bridge_preconditions(data, expected_cwd, expected_session_id,
+                                  expected_fork_from=_EXPECTED_SESSION_UNSET):
     """CAS 保存の前提が現在の bridge 設定にも残っているかを返す。"""
     if data is None:
         return False
     if expected_cwd is not None and data.get("cwd") != expected_cwd:
         return False
-    return (expected_session_id is _EXPECTED_SESSION_UNSET
-            or data.get("session_id") == expected_session_id)
+    if (expected_session_id is not _EXPECTED_SESSION_UNSET
+            and data.get("session_id") != expected_session_id):
+        return False
+    return (expected_fork_from is _EXPECTED_SESSION_UNSET
+            or data.get("fork_from") == expected_fork_from)
 
 
 def _save_session_id(session_id, expected_cwd=None,
-                     expected_session_id=_EXPECTED_SESSION_UNSET):
+                     expected_session_id=_EXPECTED_SESSION_UNSET,
+                     expected_fork_from=_EXPECTED_SESSION_UNSET,
+                     clear_fork_from=False):
     """前提が一致する場合だけ bridge の session_id を原子的に置き換える。
 
-    expected_cwd / expected_session_id は worker 開始時の接続先を CAS 前提にする。
+    expected_cwd / expected_session_id / expected_fork_from は worker 開始時の
+    接続先を CAS 前提にする。
     既存の手動選択・切断呼び出しは前提を渡さず、従来どおり保存できる。
     """
     bridge_file = _bridge_file()
@@ -164,14 +173,17 @@ def _save_session_id(session_id, expected_cwd=None,
                 # 従来どおり、手動操作はまだ存在しない登録ファイルを作成できる。
                 # ただし worker の CAS 保存や壊れた JSON root は未設定として拒否する。
                 if (bridge_file.exists() or expected_cwd is not None
-                        or expected_session_id is not _EXPECTED_SESSION_UNSET):
+                        or expected_session_id is not _EXPECTED_SESSION_UNSET
+                        or expected_fork_from is not _EXPECTED_SESSION_UNSET):
                     return False
                 data = {}
             if not _matches_bridge_preconditions(
-                    data, expected_cwd, expected_session_id):
+                    data, expected_cwd, expected_session_id, expected_fork_from):
                 return False
             data = dict(data)
             data["session_id"] = session_id
+            if clear_fork_from:
+                data.pop("fork_from", None)
             data["registered_by"] = "claude_bridge panel"
             temp_file = bridge_file.with_suffix(".json.tmp")
             temp_file.write_text(
@@ -314,11 +326,15 @@ def _run_claude(full_prompt):
     if not claude:
         _result_box = {"ready": True, "error": True, "text": "claude コマンドが見つからない"}
         return
-    # session_id があれば継続 (-r)、なければ新規セッションとして実行。
-    # 新規の場合は応答の session_id を保存して、次の送信から続きになる。
+    # fork_from があれば写しを作り、session_id のみなら継続 (-r) する。
+    # 新規または fork の場合は応答の session_id を保存して、次の送信から続きになる。
     cmd = [claude]
-    if bridge.get("session_id"):
-        cmd += ["-r", bridge["session_id"]]
+    session_id = bridge.get("session_id")
+    fork_from = bridge.get("fork_from")
+    if fork_from:
+        cmd += ["-r", fork_from, "--fork-session"]
+    elif session_id:
+        cmd += ["-r", session_id]
     # MCP はこのリポの1台だけに絞り、組み込みツールは無効化する。
     # グローバル設定の MCP まで毎回 spawn すると起動が数秒重くなる
     # （実測で 6.1s → 4.2s）。scratch の書き込み・差分編集は MCP 側で担う。
@@ -362,16 +378,19 @@ def _run_claude(full_prompt):
                     new_sid.lower(),
                 )
             )
-            if not err and is_valid_session_id and new_sid != bridge.get("session_id"):
+            if not err and is_valid_session_id and new_sid != session_id:
                 saved = _save_session_id(
                     new_sid,
                     expected_cwd=cwd,
-                    expected_session_id=bridge.get("session_id"),
+                    expected_session_id=session_id,
+                    expected_fork_from=fork_from,
+                    clear_fork_from=bool(fork_from),
                 )
                 if not saved:
                     current_bridge = _load_bridge()
                     if (not current_bridge or current_bridge.get("cwd") != cwd
-                            or current_bridge.get("session_id") != bridge.get("session_id")):
+                            or current_bridge.get("session_id") != session_id
+                            or current_bridge.get("fork_from") != fork_from):
                         text += "\n(接続先が切り替わったため、この会話の接続先は保存しなかった)"
             if err and p.stderr:
                 text += "\n" + p.stderr[:300]
@@ -503,7 +522,7 @@ class CLAUDE_OT_pick_session(bpy.types.Operator):
     session_id: bpy.props.StringProperty()
 
     def execute(self, context):
-        if _save_session_id(self.session_id):
+        if _save_session_id(self.session_id, clear_fork_from=True):
             self.report({"INFO"}, "接続先: ..." + self.session_id[-8:])
         else:
             self.report({"ERROR"}, "登録ファイルを書けなかった")
@@ -516,7 +535,7 @@ class CLAUDE_OT_disconnect_session(bpy.types.Operator):
     bl_description = "セッションの接続を解除する（登録した cwd は残るので、選び直しや新規送信はできる）"
 
     def execute(self, context):
-        if _save_session_id(None):
+        if _save_session_id(None, clear_fork_from=True):
             self.report({"INFO"}, "接続を解除した")
         else:
             self.report({"ERROR"}, "登録ファイルを書けなかった")
@@ -534,18 +553,23 @@ class CLAUDE_PT_panel(bpy.types.Panel):
         layout = self.layout
         bridge = _load_bridge()
         sid = (bridge or {}).get("session_id")
+        fork_from = (bridge or {}).get("fork_from")
+        connection_id = fork_from or sid
         cwd = (bridge or {}).get("cwd")
         status = wm.claude_bridge_status
         is_working = status == "WORKING"
-        if not sid and not cwd:
+        if not connection_id and not cwd:
             # 完全初期状態: 案内だけ出して終わり
             layout.label(text="未セットアップ", icon="ERROR")
             layout.label(text="Claude Code で /blender-setup を実行してね")
             return
-        if sid:
+        if connection_id:
             row = layout.row(align=True)
             row.enabled = not is_working
-            row.label(text="接続先: ..." + sid[-8:], icon="LINKED")
+            label = "接続先: ..." + connection_id[-8:]
+            if fork_from:
+                label += "（写し待ち）"
+            row.label(text=label, icon="LINKED")
             row.operator("claude.disconnect_session", text="", icon="X")
         else:
             # cwd だけある: 既存セッションを選ぶか、新規のまま送るか
@@ -575,7 +599,7 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             grid.prop(wm, prop)
         row = layout.row()
         row.enabled = not is_working and bridge_server.is_running()
-        if sid:
+        if connection_id:
             row.operator("claude.send_request", icon="PLAY")
         else:
             row.operator("claude.send_request", text="新規セッションで送る", icon="PLAY")
