@@ -2,13 +2,13 @@
 
 [English](README.md) | **日本語**
 
-**Blender の中から、あなたの Claude Code に頼む。**
+**Blender の中から、あなたの Claude Code に頼む。**セッションも、会話の文脈も、CLAUDE.md も、そのまま。
 
 Blender の N パネルに小さな窓を開き、いま使っている Claude Code のセッションにそのまま依頼を送る逆方向連携。頼んだ作業は、Claude が同梱の MCP サーバー経由で Blender を直接操作して実行します——デスクトップでの会話の続きのまま、Blender から出ずに。
 
 構成はこのリポジトリで完結します：Blender アドオン + 同梱 MCP サーバー + あなたの Claude Code。それだけ。
 
-> 開発中（試作 v0.13.0）。1.0.0 は初回公開時。動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows
+> 開発中（試作 v0.13.0）。1.0.0 は初回公開時。動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows（macOS/Linux は未確認）
 
 ## できること
 
