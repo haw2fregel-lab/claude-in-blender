@@ -242,6 +242,32 @@ def _save_model(model):
         return False
 
 
+def _save_fork_from(fork_source):
+    """bridge を「この ID の写しを作る」状態にする。元セッションには書き込まない。
+
+    bridge_register.py と同じ対で書く: fork_from を立て、session_id を空にする。
+    """
+    bridge_file = _bridge_file()
+    try:
+        with _bridge_file_lock, _lock_bridge_file(bridge_file):
+            data = _load_bridge()
+            if data is None:
+                if bridge_file.exists():
+                    return False
+                data = {}
+            data = dict(data)
+            data["fork_from"] = fork_source
+            data["session_id"] = None
+            data["registered_by"] = "claude_bridge panel"
+            temp_file = bridge_file.with_suffix(".json.tmp")
+            temp_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(temp_file, bridge_file)
+            return True
+    except OSError:
+        return False
+
+
 def _project_slug(cwd):
     """Claude Code の projects ディレクトリ名（英数字以外を - に置換）。"""
     return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
@@ -571,14 +597,17 @@ class CLAUDE_OT_refresh_sessions(bpy.types.Operator):
 
 class CLAUDE_OT_pick_session(bpy.types.Operator):
     bl_idname = "claude.pick_session"
-    bl_label = "このセッションに繋ぐ"
-    bl_description = "選んだセッションを接続先として登録する"
+    bl_label = "このセッションの写しから始める"
+    bl_description = ("選んだセッションの写し (fork) をパネル専用セッションとして育てる。"
+                      "元の会話には書き込まない")
 
     session_id: bpy.props.StringProperty()
 
     def execute(self, context):
-        if _save_session_id(self.session_id, clear_fork_from=True):
-            self.report({"INFO"}, "接続先: ..." + self.session_id[-8:])
+        # 継続 (-r) 直結は作らない: デスクトップ育ちの履歴へパネル構成で
+        # 書き込むと、会話が混線しキャッシュも毎回プレフィックス不一致になる。
+        if _save_fork_from(self.session_id):
+            self.report({"INFO"}, "写し元: ..." + self.session_id[-8:])
         else:
             self.report({"ERROR"}, "登録ファイルを書けなかった")
         return {"FINISHED"}
@@ -653,7 +682,7 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             layout.label(text="セッション未接続", icon="UNLINKED")
             box = layout.box()
             box.enabled = not is_working
-            box.label(text="接続先を選ぶ (直近5件):")
+            box.label(text="写しの元を選ぶ (直近5件):")
             cache_ok = _session_cache["loaded"] and _session_cache["cwd"] == cwd
             if cache_ok:
                 for pick_id, pick_label in _session_cache["items"]:

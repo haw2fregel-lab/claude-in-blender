@@ -8,7 +8,7 @@ claude-in-blender opens a small window in Blender's N-panel and sends your reque
 
 Everything lives in this repository: a Blender add-on + a bundled MCP server + your Claude Code. That's the whole stack.
 
-> Work in progress (prototype v0.11.0). 1.0.0 will be the first public release. Tested on: Blender 5.1.2 / Claude Code 2.1.228 / Windows
+> Work in progress (prototype v0.12.0). 1.0.0 will be the first public release. Tested on: Blender 5.1.2 / Claude Code 2.1.228 / Windows
 
 ## What it does
 

@@ -316,6 +316,26 @@ def test_save_model_rejects_broken_bridge_root(bridge_file):
     assert bridge_file.read_text(encoding="utf-8") == "[]\n"
 
 
+def test_save_fork_from_arms_a_fork_and_clears_the_session(bridge_file, tmp_path):
+    cwd = _project_cwd(tmp_path)
+    _write_bridge(bridge_file, cwd, session_id=_STORED_SESSION, model="haiku")
+
+    assert panel._save_fork_from(_FORK_SOURCE) is True
+    data = json.loads(bridge_file.read_text(encoding="utf-8"))
+    assert data["fork_from"] == _FORK_SOURCE
+    assert data["session_id"] is None
+    assert data["cwd"] == cwd
+    assert data["model"] == "haiku"
+
+
+def test_save_fork_from_rejects_broken_bridge_root(bridge_file):
+    bridge_file.parent.mkdir(parents=True)
+    bridge_file.write_text("[]\n", encoding="utf-8")
+
+    assert panel._save_fork_from(_FORK_SOURCE) is False
+    assert bridge_file.read_text(encoding="utf-8") == "[]\n"
+
+
 @pytest.mark.parametrize(
     ("bridge", "expected"),
     [
