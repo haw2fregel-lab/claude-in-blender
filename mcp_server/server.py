@@ -291,12 +291,20 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
         raise _bridge_error(result)
 
     def _fmt_exec(res: dict) -> str:
-        val = res["data"]["result"]
+        data = res["data"]
+        val = data["result"]
         if val is None:
-            return "OK"
-        if isinstance(val, str):
-            return val
-        return json.dumps(val, ensure_ascii=False)
+            text = "OK"
+        elif isinstance(val, str):
+            text = val
+        else:
+            text = json.dumps(val, ensure_ascii=False)
+        if data.get("output_truncated"):
+            return (
+                "[output truncated: showing first ~50 KB of "
+                f"{data['original_bytes']:,} bytes]\n{text}"
+            )
+        return text
 
     text_content = TextContent(type="text", text=_fmt_exec(result))
     if not capture_after:

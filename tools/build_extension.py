@@ -14,6 +14,8 @@ SRC = ROOT / "claude_bridge"
 README = ROOT / "README.md"
 README_JA = ROOT / "README.ja.md"
 
+LICENSE = ROOT / "LICENSE"
+
 
 def _manifest_version() -> str:
     manifest = (SRC / "blender_manifest.toml").read_text(encoding="utf-8")
@@ -30,6 +32,7 @@ def _build_zip(version: str) -> Path:
         for file_path in sorted(SRC.rglob("*")):
             if file_path.is_file() and "__pycache__" not in file_path.parts:
                 archive.write(file_path, file_path.relative_to(SRC))
+        archive.write(LICENSE, "LICENSE")
     print(output)
     return output
 
@@ -84,12 +87,12 @@ def _validate_extension(archive: Path) -> int:
 
 def main() -> int:
     version = _manifest_version()
-    archive = _build_zip(version)
     mismatches = _readme_mismatches(version)
     if mismatches:
         for mismatch in mismatches:
             print(f"README consistency check failed: {mismatch}", file=sys.stderr)
         return 1
+    archive = _build_zip(version)
     return _validate_extension(archive)
 
 

@@ -33,6 +33,7 @@ _MAX_OUTPUT_BYTES = 1_000_000
 _SCREENSHOT_MAX_SIZE = 768
 _MAX_RESPONSE_BYTES = 50_000
 _REQUEST_JOURNAL_LIMIT = 256
+_MAX_ERROR_BYTES = 2_048
 _FINAL_REQUEST_STATUSES = frozenset({"succeeded", "failed"})
 
 
@@ -229,6 +230,65 @@ def _log_exec(text):
             log.write("# (older log truncated)\n" + "\n".join(retained) + "\n")
     except Exception:  # noqa: BLE001
         pass
+
+
+def _utf8_prefix(text, max_bytes):
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _traceback_tail(text, max_bytes):
+    lines = text.rstrip().splitlines()
+    if not lines:
+        return ""
+
+    last_file_line = next(
+        (
+            index
+            for index in range(len(lines) - 1, -1, -1)
+            if lines[index].lstrip().startswith("File ")
+        ),
+        None,
+    )
+    if last_file_line is None:
+        return _utf8_prefix("\n".join(lines[-2:]), max_bytes)
+
+    tail = "\n".join(lines[last_file_line:])
+    if len(tail.encode("utf-8")) <= max_bytes:
+        return tail
+
+    location = "\n".join(lines[last_file_line:-1])
+    remaining = max_bytes - len(location.encode("utf-8")) - 1
+    if remaining > 0:
+        return location + "\n" + _utf8_prefix(lines[-1], remaining)
+    return _utf8_prefix(location, max_bytes)
+
+
+def _truncate_large_error(result):
+    error = result.get("error") if isinstance(result, dict) else None
+    if not isinstance(error, dict):
+        return False
+
+    message = str(error.get("message", ""))
+    traceback_text = str(error.get("traceback", ""))
+    original_bytes = len(message.encode("utf-8")) + len(traceback_text.encode("utf-8"))
+    if original_bytes <= _MAX_ERROR_BYTES:
+        return False
+
+    try:
+        _log_exec(f"# -> ERROR (full): {message}\n{traceback_text}")
+    except Exception:  # noqa: BLE001
+        pass
+    notice = (
+        " ... (truncated; full error in claude_bridge_log, original "
+        f"{original_bytes:,} bytes)"
+    )
+    traceback_tail = _traceback_tail(traceback_text, _MAX_ERROR_BYTES // 2)
+    message_limit = _MAX_ERROR_BYTES - len(traceback_tail.encode("utf-8"))
+    message_head = _utf8_prefix(message, message_limit - len(notice.encode("utf-8")))
+    error["message"] = message_head + notice
+    if "traceback" in error:
+        error["traceback"] = traceback_tail
+    return True
 
 
 def clear_exec_log():
@@ -539,6 +599,7 @@ def _process_pending():
 
                 if execute_started:
                     result = _handle_command(command, params)
+                    _truncate_large_error(result)
                     if request_id is not None:
                         result["request_id"] = request_id
                     with _pending_lock:
@@ -555,7 +616,9 @@ def _process_pending():
                             result["ack_required"] = True
                             holder["result"] = result
             elif holder["result"] is None:
-                holder["result"] = _handle_command(command, params)
+                result = _handle_command(command, params)
+                _truncate_large_error(result)
+                holder["result"] = result
             if request_id is not None and holder["result"] is not None:
                 holder["result"]["request_id"] = request_id
         except json.JSONDecodeError as e:
@@ -567,9 +630,11 @@ def _process_pending():
                     _journal_update_locked(request_id, "failed", error=str(e))
                     _blocked_request_id = request_id
             if holder["result"] is None:
-                holder["result"] = _err(
+                result = _err(
                     str(e), tb=traceback.format_exc(), start=time.monotonic()
                 )
+                _truncate_large_error(result)
+                holder["result"] = result
                 if command == "execute_code" and request_id is not None:
                     holder["result"]["request_id"] = request_id
                     holder["result"]["ack_required"] = True
@@ -771,12 +836,13 @@ def _client_handler(conn, addr):
                             "original_bytes": len(resp_bytes),
                         }
                     else:
-                        # エラーレスポンスが巨大な場合（まず起きないが安全弁）
-                        result = _err(
-                            f"Response too large ({len(resp_bytes)} bytes)",
-                            start=time.monotonic(),
-                        )
-                        holder["result"] = result
+                        # 安全弁: それでも巨大な応答は中身だけ差し替える。封筒を
+                        # 作り直すと request_id / ack_required が落ち、ACK 経路が詰まる。
+                        result["ok"] = False
+                        result.pop("data", None)
+                        result["error"] = {
+                            "message": f"Response too large ({len(resp_bytes)} bytes)"
+                        }
                     resp_bytes = _encode_response(holder["result"])
 
                 conn.sendall(resp_bytes)
