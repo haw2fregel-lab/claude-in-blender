@@ -339,6 +339,34 @@ def _find_claude(bridge):
     return str(fallback) if fallback.exists() else None
 
 
+_LOGIN_SHELL_PATH_CACHE = None
+
+
+def _login_shell_path():
+    # GUI 起動の Blender は .zshrc / .zprofile を読まないので PATH が痩せる。
+    # そのまま fork Claude を spawn すると、fork Claude が起動する MCP server の
+    # command（`.mcp.json` の `python` など）が解決できず MCP が使えない。
+    # login shell 経由で PATH を取り直して子プロセスの env に注入する。
+    global _LOGIN_SHELL_PATH_CACHE
+    if _LOGIN_SHELL_PATH_CACHE is not None:
+        return _LOGIN_SHELL_PATH_CACHE
+    fallback = os.environ.get("PATH", "")
+    if os.name == "nt":
+        _LOGIN_SHELL_PATH_CACHE = fallback
+        return _LOGIN_SHELL_PATH_CACHE
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    try:
+        r = subprocess.run(
+            [shell, "-l", "-c", 'printf %s "$PATH"'],
+            capture_output=True, text=True, timeout=5,
+        )
+        got = (r.stdout or "").strip()
+        _LOGIN_SHELL_PATH_CACHE = got or fallback
+    except Exception:
+        _LOGIN_SHELL_PATH_CACHE = fallback
+    return _LOGIN_SHELL_PATH_CACHE
+
+
 def _parse_stream_json(stdout):
     """stream-json 出力（1行1イベント）から (result イベント, 最終コールの usage) を返す。
 
@@ -433,6 +461,7 @@ def _run_claude(full_prompt):
     ]
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        child_env = {**os.environ, "PATH": _login_shell_path()}
         p = subprocess.run(
             cmd,
             input=full_prompt,
@@ -440,6 +469,7 @@ def _run_claude(full_prompt):
             cwd=bridge.get("cwd") or str(Path.home()),
             timeout=300,
             creationflags=flags,
+            env=child_env,
         )
         d, last_usage = _parse_stream_json(p.stdout)
         if d is not None:
