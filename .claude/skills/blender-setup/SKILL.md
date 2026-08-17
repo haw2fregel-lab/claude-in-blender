@@ -38,7 +38,23 @@ CLI で入れられない場合（blender が見つからない・サブコマ�
 `python tools/bridge_register.py --cwd .` を実行する。スキル実行中は `CLAUDE_CODE_SESSION_ID`
 でこのセッションを正確に登録する。出力に `(env)` が無い fallback 時のみ、session 末尾8文字を控える。
 
-## 5. 疎通確認
+## 5. MCP 承認ゲートの確認
+
+`python tools/check_mcp_approval.py` を実行し、JSON の `status` を確認する。
+
+- `missing`: `entries` に出た各 project entry について、実際に不足している値を
+  `hasTrustDialogAccepted: false → true`、`enabledMcpjsonServers`:
+  `"claude-in-blender"` なし → 既存値を残して追加、と before/after で示す。
+  `.claude.json.bak-<timestamp>` が先に作られることと、修復後は既存 fork を
+  `/blender-bridge` で作り直す必要があることも伝え、書き換えてよいか確認する。
+  承認されたら `python tools/check_mcp_approval.py --fix` を実行する。最終報告には
+  「Claude Code の信頼ダイアログをスキル経由で承認済みに設定した」と明記する。
+  断られたら書き換えず先へ進み、最終報告に「未修復」と残す。
+- `ok` / `no-entry` / `no-file`: 何も書き換えず先へ進む。Claude Code を使っていない
+  可能性があるため、`no-entry` / `no-file` は触らない。
+- `broken`: 書き換えず、`.claude.json` を確認できなかったことだけ報告する。
+
+## 6. 疎通確認
 
 - このセッションに `mcp__claude-in-blender__*` ツールが生えているなら
   `get_bridge_status` を叩く。Blender が起動していればバージョン情報が返る。
