@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "claude-in-blender": {
-      "command": "python",
+      "command": "${CLAUDE_IN_BLENDER_PYTHON:-python}",
       "args": ["mcp_server/server.py"]
     }
   }

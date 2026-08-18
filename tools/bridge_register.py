@@ -70,8 +70,15 @@ def find_claude():
         p = shutil.which(name)
         if p:
             return p
-    fallback = Path.home() / ".local" / "bin" / "claude.exe"
-    return str(fallback) if fallback.exists() else None
+    # native installer の既定置き場。.exe を先に見る——Windows に Git Bash 用の
+    # 拡張子なしシムが同居していても、subprocess で実行できる方を返すため。
+    for fallback in (
+        Path.home() / ".local" / "bin" / "claude.exe",
+        Path.home() / ".local" / "bin" / "claude",
+    ):
+        if fallback.exists():
+            return str(fallback)
+    return None
 
 
 def main():

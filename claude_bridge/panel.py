@@ -335,8 +335,17 @@ def _find_claude(bridge):
         p = shutil.which(name)
         if p:
             return p
-    fallback = Path.home() / ".local" / "bin" / "claude.exe"
-    return str(fallback) if fallback.exists() else None
+    # native installer の既定置き場。.exe を先に見る——Windows に Git Bash 用の
+    # 拡張子なしシムが同居していても、subprocess で実行できる方を返すため。
+    # macOS は GUI 起動の Blender だと PATH が痩せて which が外れるので、
+    # この fallback が ~/.local/bin/claude を拾う本線になる。
+    for fallback in (
+        Path.home() / ".local" / "bin" / "claude.exe",
+        Path.home() / ".local" / "bin" / "claude",
+    ):
+        if fallback.exists():
+            return str(fallback)
+    return None
 
 
 _LOGIN_SHELL_PATH_CACHE = None
@@ -365,6 +374,20 @@ def _login_shell_path():
     except Exception:
         _LOGIN_SHELL_PATH_CACHE = fallback
     return _LOGIN_SHELL_PATH_CACHE
+
+
+def _python_for_mcp(path_value):
+    # .mcp.json の command は ${CLAUDE_IN_BLENDER_PYTHON:-python}。macOS は
+    # python コマンドが無いことが多く（Homebrew / python.org とも python3 のみ）、
+    # fork spawn 時にこの変数で実体パスを渡して MCP server を立てられるようにする。
+    # Windows は default の python で従来通り動くため触らない。
+    if os.name == "nt" or os.environ.get("CLAUDE_IN_BLENDER_PYTHON"):
+        return None
+    for name in ("python", "python3"):
+        p = shutil.which(name, path=path_value)
+        if p:
+            return p
+    return None
 
 
 def _parse_stream_json(stdout):
@@ -462,6 +485,9 @@ def _run_claude(full_prompt):
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         child_env = {**os.environ, "PATH": _login_shell_path()}
+        mcp_python = _python_for_mcp(child_env["PATH"])
+        if mcp_python:
+            child_env["CLAUDE_IN_BLENDER_PYTHON"] = mcp_python
         p = subprocess.run(
             cmd,
             input=full_prompt,

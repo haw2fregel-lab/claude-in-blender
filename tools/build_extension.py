@@ -55,14 +55,25 @@ def _readme_mismatches(version: str) -> list[str]:
     return errors
 
 
-def _version_key(blender: Path) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.findall(r"\d+", blender.parent.name))
+WINDOWS_BLENDERS = Path(r"C:\Program Files\Blender Foundation")
+MAC_APPLICATIONS = Path("/Applications")
+
+
+def _version_key(name: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", name))
 
 
 def _find_blender() -> str | None:
-    installed = list(Path(r"C:\Program Files\Blender Foundation").glob("Blender */blender.exe"))
-    if installed:
-        return str(max(installed, key=_version_key))
+    if sys.platform == "darwin":
+        # 公式 dmg は Blender.app。複数共存はリネーム慣習（Blender 4.5.app など）で、
+        # 数字なしの Blender.app はバージョン共存時に最古扱いになる。
+        installed = list(MAC_APPLICATIONS.glob("Blender*.app/Contents/MacOS/Blender"))
+        if installed:
+            return str(max(installed, key=lambda p: _version_key(p.parents[2].name)))
+    else:
+        installed = list(WINDOWS_BLENDERS.glob("Blender */blender.exe"))
+        if installed:
+            return str(max(installed, key=lambda p: _version_key(p.parent.name)))
     return shutil.which("blender") or shutil.which("blender.exe")
 
 

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tools import build_extension
+
 
 ROOT = Path(__file__).resolve().parents[1]
 COPY_IGNORE = shutil.ignore_patterns(
@@ -64,3 +66,49 @@ def test_readme_version_mismatch_leaves_dist_without_a_zip(working_copy):
     completed = _build(working_copy)
 
     assert _built_zips(working_copy) == [], completed.stdout + completed.stderr
+
+
+def _plant_blender(root, rel):
+    exe = root / rel
+    exe.parent.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+    return exe
+
+
+def test_find_blender_windows_picks_the_newest_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_extension.sys, "platform", "win32")
+    monkeypatch.setattr(build_extension, "WINDOWS_BLENDERS", tmp_path)
+    _plant_blender(tmp_path, Path("Blender 4.2/blender.exe"))
+    newest = _plant_blender(tmp_path, Path("Blender 4.5/blender.exe"))
+
+    assert build_extension._find_blender() == str(newest)
+
+
+def test_find_blender_darwin_scans_applications(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_extension.sys, "platform", "darwin")
+    monkeypatch.setattr(build_extension, "MAC_APPLICATIONS", tmp_path)
+    plain = _plant_blender(tmp_path, Path("Blender.app/Contents/MacOS/Blender"))
+
+    assert build_extension._find_blender() == str(plain)
+
+
+# 数字なしの Blender.app はバージョン () 扱い——リネーム共存では数字入りが新しい。
+def test_find_blender_darwin_prefers_versioned_app_over_plain(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_extension.sys, "platform", "darwin")
+    monkeypatch.setattr(build_extension, "MAC_APPLICATIONS", tmp_path)
+    _plant_blender(tmp_path, Path("Blender.app/Contents/MacOS/Blender"))
+    versioned = _plant_blender(tmp_path, Path("Blender 4.5.app/Contents/MacOS/Blender"))
+
+    assert build_extension._find_blender() == str(versioned)
+
+
+def test_find_blender_falls_back_to_path_lookup(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_extension.sys, "platform", "darwin")
+    monkeypatch.setattr(build_extension, "MAC_APPLICATIONS", tmp_path / "empty")
+    monkeypatch.setattr(
+        build_extension.shutil,
+        "which",
+        lambda name: "/opt/blender/blender" if name == "blender" else None,
+    )
+
+    assert build_extension._find_blender() == "/opt/blender/blender"

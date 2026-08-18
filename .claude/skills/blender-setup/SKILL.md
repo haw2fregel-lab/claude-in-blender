@@ -7,6 +7,9 @@ description: claude-in-blender の初期セットアップ。Python 依存 → �
 このリポを初めて使う環境を、Blender のパネルから送信できる状態まで持っていく。
 各ステップは失敗しても止まらず先へ進み、できなかったことは最後にまとめて報告する。
 
+以下の `python` は、macOS / Linux では `python3` に読み替える（素の macOS に
+`python` コマンドは無い）。
+
 ## 1. Python 依存
 
 `python -m pip install -r requirements.txt`。
@@ -17,9 +20,10 @@ description: claude-in-blender の初期セットアップ。Python 依存 → �
 
 ## 3. Blender へアドオンをインストール
 
-blender.exe を探す（複数あれば最新バージョン）:
+Blender の実行ファイルを探す（複数あれば最新バージョン）:
 
 - Windows 標準: `C:\Program Files\Blender Foundation\Blender *\blender.exe`
+- macOS 標準: `/Applications/Blender*.app/Contents/MacOS/Blender`
 - PATH 上の `blender`
 
 見つかったら、決め打ちせず先に `"<blender>" --command extension --help` を実行して、
@@ -60,6 +64,9 @@ CLI で入れられない場合（blender が見つからない・サブコマ�
   `get_bridge_status` を叩く。Blender が起動していればバージョン情報が返る。
 - ツールが無いなら: このリポで Claude Code を開き直すと `.mcp.json` から
   MCP サーバーが登録される（初回は承認が出る）ことを案内する。
+  macOS / Linux で `python` コマンドが無い環境では、シェルの rc に
+  `export CLAUDE_IN_BLENDER_PYTHON="$(command -v python3)"` を足してから
+  開き直すよう案内する（パネル経由の fork は設定不要——パネルが自動で渡す）。
 - Blender が未起動なら: 起動して 3D Viewport で N キー →「Claude」タブに
   「Connected: ...<末尾8文字>」と「Bridge: running」が出ることを確認してもらう。
 

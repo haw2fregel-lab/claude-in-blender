@@ -207,3 +207,28 @@ def test_register_paths_and_latest_session_use_nonempty_claude_config_dir(tmp_pa
 
     assert Path(bridge_file) == config_root / "blender-bridge-session.json"
     assert session == "custom-session"
+
+
+# ~/.local/bin fallback は native installer の既定置き場を OS 共通で拾う。
+# .exe が先なのは、Windows に Git Bash 用の拡張子なしシムが同居していても
+# subprocess で実行できる方を返すため（macOS/Linux は .exe が無く素の claude に落ちる）。
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        (("claude.exe",), "claude.exe"),
+        (("claude",), "claude"),
+        (("claude.exe", "claude"), "claude.exe"),
+        ((), None),
+    ],
+)
+def test_find_claude_local_bin_fallback(monkeypatch, tmp_path, names, expected):
+    monkeypatch.setattr(bridge_register.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(bridge_register.Path, "home", lambda: tmp_path)
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    for name in names:
+        (bin_dir / name).write_text("", encoding="utf-8")
+
+    got = bridge_register.find_claude()
+
+    assert got == (str(bin_dir / expected) if expected else None)
