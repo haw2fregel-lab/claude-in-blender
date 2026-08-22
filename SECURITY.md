@@ -7,17 +7,18 @@ you can decide whether that trade is one you want.
 
 ## Threat model in one line
 
-**Everything inside your user account is trusted; nothing outside it is reachable.** The
-add-on is designed to keep Blender's power available to a local Claude Code process, not
-to contain it. If an attacker already runs code as your user, this add-on gives them no
+**All processes running under your user account are trusted; the bridge is not reachable
+from outside this host.** The add-on is designed to expose Blender's capabilities to a
+local Claude Code process, not to sandbox that process. If an attacker already runs code as your user, this add-on gives them no
 new capability they did not already have — but it also does not defend against them.
 
 ## The trust boundary
 
-- The bridge binds **`127.0.0.1:9877` only** (`_DEFAULT_PORT`, configurable). It is never
+- The bridge listens on **`127.0.0.1:9877` only** (`_DEFAULT_PORT`, configurable). It is never
   exposed to the network, and no inbound connection from another host is possible.
-- Every request must carry a **session token** — 16 random bytes from `secrets.token_hex`,
-  regenerated each time the bridge starts. Requests with a wrong token are rejected.
+- Every request must carry a **session token** — generated with `secrets.token_hex(16)`, a
+  32-character hexadecimal string representing 16 random bytes, regenerated each time the
+  bridge starts. Requests with a wrong token are rejected.
 - The token is published as a plain-text file at
   `<system temp dir>/claude-in-blender/blender-session-token`, protected by ordinary
   filesystem permissions. It is removed when the bridge stops.
@@ -38,7 +39,7 @@ Sending a request from the panel launches Claude Code with these flags:
 
 Read that as two separate facts:
 
-- **Claude Code's own tools are switched off.** `--tools ""` means no file reads, no file
+- **Claude Code's built-in tools are disabled.** `--tools ""` means no file reads, no file
   writes, no shell. The bundled MCP server is the only way out.
 - **Every bundled MCP tool is pre-approved.** `--allowedTools mcp__claude-in-blender__*`
   means that once you press Send, Claude will run those tools **without asking you again**
@@ -81,7 +82,7 @@ including anything that code printed. Use the panel's **Clear log** button befor
 the file to someone else.
 
 The add-on never reads, stores, or transmits credentials. Authentication and usage both
-ride on your already-logged-in Claude Code account — a subscription login spends
+run through your already-logged-in Claude Code account — a subscription login spends
 subscription quota, an API account bills through the API. No additional key is registered
 anywhere.
 

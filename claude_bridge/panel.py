@@ -594,9 +594,9 @@ def _build_prompt(prompt, directives=()):
 class CLAUDE_OT_send(bpy.types.Operator):
     bl_idname = "claude.send_request"
     bl_label = "Send to Claude"
-    bl_description = ("Send the request to your Claude Code session. "
-                      "Only the source label \"[Sent from Blender]\" and "
-                      "checked context directives are added — nothing hidden")
+    bl_description = ("Send the request to Claude Code. "
+                      "Only the source label \"[Sent from Blender]\" and the "
+                      "selected context directives are added — nothing else")
 
     def invoke(self, context, event):
         # 前回の送信から別の .blend が開かれていたら、送る前に一度だけ確かめる。
@@ -685,9 +685,9 @@ class CLAUDE_OT_refresh_sessions(bpy.types.Operator):
 
 class CLAUDE_OT_pick_session(bpy.types.Operator):
     bl_idname = "claude.pick_session"
-    bl_label = "Start from a Fork of This Session"
-    bl_description = ("Grow a fork of the selected session as the panel's own. "
-                      "Nothing is appended to the original conversation")
+    bl_label = "Fork This Session"
+    bl_description = ("Fork the selected session and use the copy as the panel's own. "
+                      "Nothing is appended to the original session")
 
     session_id: bpy.props.StringProperty()
 
@@ -704,7 +704,7 @@ class CLAUDE_OT_pick_session(bpy.types.Operator):
 class CLAUDE_OT_pick_model(bpy.types.Operator):
     bl_idname = "claude.pick_model"
     bl_label = "Select Model"
-    bl_description = "Model for new sessions (applies to new sends and a fork's first send)"
+    bl_description = "Model for a new session or a fork's first request"
 
     model: bpy.props.EnumProperty(items=_MODEL_ITEMS)
 
