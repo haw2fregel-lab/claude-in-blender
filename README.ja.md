@@ -8,7 +8,7 @@ Blender の N パネルに小さな窓を開き、いま使っている Claude C
 
 構成はこのリポジトリで完結します：Blender アドオン + 同梱 MCP サーバー + あなたの Claude Code。それだけ。
 
-> **v0.17.0** — 開発中（試作）。1.0.0 は初回公開時。動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows（macOS/Linux は未確認）
+> **v1.0.0** — 動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows（macOS/Linux は未確認） · [変更履歴](CHANGELOG.md) · [セキュリティ](SECURITY.md)
 
 ## できること
 
