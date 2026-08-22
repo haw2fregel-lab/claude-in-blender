@@ -4,17 +4,102 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   test:
+    name: Unit (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+        # 3.10 は README が謳う下限。下限で通ることを毎回見る。
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest tests/ -v
+
+  blender:
+    # 実機を使う唯一の job。ここが緑でない限り「validate が通った」とは言わない。
+    name: Blender (real, LTS lower bound)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # blender_manifest.toml の blender_version_min に合わせて LTS の下限側で見る。
+      # 上げる時はここだけ書き換える（キャッシュのキーも一緒に動く）。
+      BLENDER_SERIES: "4.2"
+      BLENDER_VERSION: "4.2.23"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install -r requirements-dev.txt
-      - run: python -m pytest tests/ -v
-      - run: python tools/build_extension.py
+
+      - name: Restore the Blender archive
+        id: blender-cache
+        uses: actions/cache@v4
+        with:
+          path: blender.tar.xz
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+
+      - name: Download Blender
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        run: |
+          # 本家 download.blender.org は Cloudflare 配下で、自動ダウンロードが 403 で
+          # 止まった実例がある（Homebrew cask #275321, 2026-07）。公式ミラーを先に引き、
+          # 全部落ちた時だけ本家へ回す。無関係の PR が Blender 側の WAF 設定で
+          # 落ちるのを避けるため。
+          name="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          for base in \
+            "https://mirrors.ocf.berkeley.edu/blender/release" \
+            "https://ftp.nluug.nl/pub/graphics/blender/release" \
+            "https://download.blender.org/release" ; do
+            echo "trying $base"
+            if curl -fsSL --retry 2 --retry-delay 5 -o blender.tar.xz \
+                 "$base/Blender${BLENDER_SERIES}/$name"; then
+              echo "fetched from $base"
+              exit 0
+            fi
+            echo "failed: $base" >&2
+          done
+          echo "every mirror failed for $name" >&2
+          exit 1
+
+      - name: Unpack Blender
+        run: |
+          mkdir -p "$HOME/blender"
+          tar -xf blender.tar.xz -C "$HOME/blender" --strip-components=1
+          echo "$HOME/blender" >> "$GITHUB_PATH"
+
+      - name: Show the Blender that will be used
+        run: blender --version
+
+      - name: Build and validate the extension
+        # Blender を用意した job なので、見つからなければ skip ではなく失敗にする。
+        env:
+          CLAUDE_BRIDGE_REQUIRE_BLENDER: "1"
+        run: python tools/build_extension.py
+
+      - name: Smoke — the behaviour the file-switch detection relies on
+        # --python-exit-code 1: スクリプトの例外を job の失敗に落とす
+        run: >
+          blender --background --factory-startup --python-exit-code 1
+          --python tools/smoke_blender.py
+
+      - name: Keep the built extension for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude_bridge-extension
+          path: dist/*.zip
+          if-no-files-found: error
