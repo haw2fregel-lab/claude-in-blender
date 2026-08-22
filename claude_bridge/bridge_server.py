@@ -6,6 +6,7 @@
 ソケットは別スレッドが持ち、bpy を触るのはタイマー経由のメインスレッドだけ。
 
 公開 API: start_server() / stop_server() / is_running() / clear_exec_log()
+        / current_generation()
 """
 
 import json
@@ -315,6 +316,64 @@ class _ExecTimeoutTracer:
         return self
 
 
+# ── File switch detection (main thread) ───────────────────
+
+# WindowManager のカスタムプロパティは、ファイルを開くと default に戻り、保存では
+# 戻らない（Blender 5.1.2 で実測）。この「戻り」をモジュール側に残した値とのズレとして
+# 読み、別の .blend が開かれたことを世代番号にする。ハンドラ（load_pre）は使わない。
+_GENERATION_PROP = "claude_bridge_generation"  # 登録は panel.register() 側
+_file_generation = 0  # 0 = 未初期化。stop_server() で戻す
+_last_exec_generation = None  # execute_code が前回見た世代（None = まだ見ていない）
+
+
+def current_generation():
+    """今の .blend を指す世代番号を返す。1 以上で、ファイルが開かれるたびに 1 増える。
+
+    呼び出しは main thread からのみ（bpy を触る）。socket スレッドから呼ばない。
+    呼び手は「前回自分が見た世代」を各自で持つ。ここが配るのは採番だけなので、
+    パネルと bridge のどちらが先に呼んでも相手の検知を消費しない。
+    window_manager が取れない時は例外を出さず直前の値を返す
+    （検知の失敗で送信や実行を止めないため）。
+    """
+    global _file_generation
+    try:
+        wm = bpy.context.window_manager
+        stored = getattr(wm, _GENERATION_PROP, 0)
+        if _file_generation == 0:  # 初回。今開いている .blend を第1世代に据える
+            marked = 1
+        elif stored != _file_generation:  # default に戻っている = ロードされた
+            marked = _file_generation + 1
+        else:
+            return _file_generation
+        setattr(wm, _GENERATION_PROP, marked)
+    except Exception:  # noqa: BLE001 - 検知の失敗で送信や実行を止めない
+        # 印を書けなかった時は世代を進めない。進めると次回もズレが残り、
+        # 呼ばれるたびに「切り替わった」と言い続ける（誤検知が止まらない）。
+        return _file_generation or 1
+    _file_generation = marked
+    return marked
+
+
+def _observe_exec_generation():
+    """前回の execute_code から .blend が切り替わっていたかを返し、見た世代を覚え直す。
+
+    通知は切替後の最初の1回だけになる。bridge は「依頼」の切れ目を知らないので、
+    「古いファイルのまま続いている」の終わりを判定できないため。
+    """
+    global _last_exec_generation
+    generation = current_generation()
+    switched = _last_exec_generation is not None and generation != _last_exec_generation
+    _last_exec_generation = generation
+    return switched
+
+
+def _with_file_switch(envelope, switched):
+    """切替が挟まった時だけ封筒へ印を載せる。通常はキー自体を出さない。"""
+    if switched:
+        envelope["file_switched"] = True
+    return envelope
+
+
 # ── Command handlers ──────────────────────────────────────
 
 
@@ -365,6 +424,10 @@ def _cmd_execute_code(params):
         f"[req {request_label}] ====\n{code.rstrip()}"
     )
 
+    # ファイル切替は弾かない。実行はそのまま通し、応答に印だけ載せて判断を Claude に残す。
+    # 成否どちらの封筒にも載せる——切替の直後は「名前が無い」等の失敗こそ手がかりになる。
+    file_switched = _observe_exec_generation()
+
     namespace = {"bpy": bpy, "__builtins__": __builtins__, "__name__": "__main__"}
     if not filename.startswith("<"):
         namespace["__file__"] = filename
@@ -374,13 +437,16 @@ def _cmd_execute_code(params):
         exec(compile(code, filename, "exec"), namespace)
     except TimeoutError as e:
         _log_exec(f"# -> TIMEOUT: {e}")
-        return _err(str(e), start=start)
+        return _with_file_switch(_err(str(e), start=start), file_switched)
     except BaseException as e:
         _log_exec(f"# -> ERROR: {e}")
-        return _err(
-            f"{type(e).__name__}: {e}",
-            tb=traceback.format_exc(),
-            start=start,
+        return _with_file_switch(
+            _err(
+                f"{type(e).__name__}: {e}",
+                tb=traceback.format_exc(),
+                start=start,
+            ),
+            file_switched,
         )
     finally:
         sys.settrace(old_trace)
@@ -392,7 +458,7 @@ def _cmd_execute_code(params):
         result = str(result)
 
     _log_exec(f"# -> result: {str(result)[:200]}")
-    return _ok({"result": result}, start)
+    return _with_file_switch(_ok({"result": result}, start), file_switched)
 
 
 def _cmd_ping(_params):
@@ -981,6 +1047,7 @@ def stop_server():
     """受け口を止め、待ち行列・ソケット・トークンを片付ける。"""
     global _running, _ready, _server_socket, _session_token, _exec_busy
     global _current_exec_request_id, _blocked_request_id
+    global _file_generation, _last_exec_generation
 
     was_running = _running
     _ready = False
@@ -1022,6 +1089,11 @@ def stop_server():
         _current_exec_request_id = None
         _blocked_request_id = None
         _request_journal.clear()
+
+    # 世代は bridge の起動単位。次の start で 1 から採番し直すので、観測側の記憶も
+    # 一緒に捨てる（古い採番と比べると、再起動の1回目を切替と誤って言う）。
+    _file_generation = 0
+    _last_exec_generation = None
 
     if _server_socket:
         try:

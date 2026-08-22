@@ -1,3 +1,4 @@
+import functools
 import json
 import socket
 import sys
@@ -19,6 +20,29 @@ if str(MCP_SERVER) not in sys.path:
 
 for module_name in ("bpy", "bmesh", "bpy_extras", "mathutils", "blf"):
     sys.modules.setdefault(module_name, MagicMock(name=module_name))
+
+
+class FakeOperator:
+    """`bpy.types.Operator` の身代わり。
+
+    MagicMock を基底にした `class Foo(bpy.types.Operator)` はクラスではなく mock を作る
+    （メタクラスが MagicMock になる）。そのままだとオペレーターの invoke / execute へ
+    テストから手が届かないので、影の中でここだけ本物のクラスにする。
+    register されないので RNA の機能は持たず、`report` だけ実物に合わせて受ける。
+    """
+
+    def __init__(self, **fields):
+        self.reports = []
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+    def report(self, level, message):
+        self.reports.append((set(level), str(message)))
+
+
+_bpy = sys.modules["bpy"]
+if isinstance(_bpy, MagicMock):
+    _bpy.types.Operator = FakeOperator
 
 bridge_package = types.ModuleType("claude_bridge")
 bridge_package.__path__ = [str(ROOT / "claude_bridge")]
@@ -125,3 +149,78 @@ def bridge_tcp(tmp_path):
         server.stop_server()
         pump_thread.join(timeout=2)
         server._HOLDER_TIMEOUT_S = original_timeout
+
+
+# --- WM プロパティの fake ---
+# 実測（Blender 5.1.2, headless）: window_manager のカスタムプロパティは
+#   保存では値が残る / .blend を開くと default に戻る / 登録自体はどちらでも生き残る。
+# MagicMock はこの差を持てず、値の読み書きも吸ってしまうため、
+# ファイル切替を見るテストだけこの fake へ差し替える。
+
+
+@dataclass
+class WmCall:
+    name: str
+    args: tuple
+    kwargs: dict
+
+
+class FakeWindowManager:
+    """値を保持する window_manager。ファイルを開くと default へ戻る。
+
+    - `claude_bridge_*` は登録済み（= default を与えた）名前だけ読める。未登録は
+      Blender と同じく AttributeError。
+    - それ以外の名前は WM の API とみなし、呼ばれた事実を `calls` へ記録する callable。
+    - 書き込みは名前を問わず受けるが、default に無い名前はロードで消える
+      （.blend を跨いで器として残るのは登録済みプロパティだけ、を模す）。
+    """
+
+    # UI の再描画は wm.windows を辿る。空で置いて、描画は空回りさせる。
+    windows = ()
+
+    def __init__(self, defaults):
+        object.__setattr__(self, "_defaults", dict(defaults))
+        object.__setattr__(self, "_values", dict(defaults))
+        object.__setattr__(self, "calls", [])
+
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        values = object.__getattribute__(self, "_values")
+        if name in values:
+            return values[name]
+        if name.startswith("claude_bridge_"):
+            raise AttributeError(name)
+        return functools.partial(self._record, name)
+
+    def __setattr__(self, name, value):
+        object.__getattribute__(self, "_values")[name] = value
+
+    def _record(self, name, *args, **kwargs):
+        self.calls.append(WmCall(name=name, args=args, kwargs=kwargs))
+        return {"RUNNING_MODAL"}
+
+    def simulate_file_load(self):
+        """.blend を開いた時: プロパティの登録は残り、値だけ default に戻る。"""
+        values = object.__getattribute__(self, "_values")
+        values.clear()
+        values.update(object.__getattribute__(self, "_defaults"))
+
+    def simulate_file_save(self):
+        """保存した時: 何も戻らない。保存で誤検知しないことが設計の成立条件。"""
+
+
+@pytest.fixture
+def fake_window_manager(monkeypatch):
+    """`bpy.context.window_manager` を値の残る fake へ差し替える factory。
+
+    どのプロパティが既定値いくつで居るかは案件ごとに違うので、呼ぶ側が渡す。
+    """
+    import bpy
+
+    def install(**defaults):
+        window_manager = FakeWindowManager(defaults)
+        monkeypatch.setattr(bpy.context, "window_manager", window_manager)
+        return window_manager
+
+    return install

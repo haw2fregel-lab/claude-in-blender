@@ -68,7 +68,8 @@ def _fmt(result: dict) -> str:
     return json.dumps(result["data"], ensure_ascii=False)
 
 
-def _bridge_error(result: dict) -> RuntimeError:
+def _bridge_error(result: dict, prefix: str = "") -> RuntimeError:
+    # prefix は封筒の外から来る注意書き（ファイル切替）。失敗の文面より前に置く。
     error = result.get("error") or {}
     msg = error.get("message", "Unknown error")
     tb = error.get("traceback")
@@ -77,7 +78,7 @@ def _bridge_error(result: dict) -> RuntimeError:
         guidance = f"Call get_request_status({request_id!r}) before another execute."
         if guidance not in msg:
             msg = f"{msg}\n{guidance}"
-    return RuntimeError(f"{msg}\n{tb}" if tb else msg)
+    return RuntimeError(prefix + (f"{msg}\n{tb}" if tb else msg))
 
 
 def _validate_scratch_name(name: str) -> str:
@@ -278,6 +279,14 @@ def edit_scratch(name: str, old: str, new: str) -> str:
     return f"Updated {path.resolve()} (replaced 1 unique match)"
 
 
+# bridge が file_switched を立てた時、Claude が読む返答文の頭に置く注意。
+# 弾かずに知らせる形なので、成否どちらの返答にも同じ一文を前置きする。
+_FILE_SWITCH_NOTICE = (
+    "The .blend file was switched since the previous operation. Re-check the scene "
+    "state before assuming anything about object names, selection, or the file path."
+)
+
+
 def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") -> list:
     # 構文エラーは Blender まで運ばず手前で弾く（行番号はファイルの実行と一致する）
     try:
@@ -287,8 +296,10 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
             f"SyntaxError: {e.msg} ({filename}, line {e.lineno}): {(e.text or '').strip()}"
         )
     result = bridge.send("execute_code", {"code": code, "filename": filename})
+    # 切替が挟まった時だけ bridge が印を立てる（通常はキー自体が来ない）
+    notice = f"{_FILE_SWITCH_NOTICE}\n\n" if result.get("file_switched") else ""
     if not result.get("ok"):
-        raise _bridge_error(result)
+        raise _bridge_error(result, prefix=notice)
 
     def _fmt_exec(res: dict) -> str:
         data = res["data"]
@@ -306,7 +317,7 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
             )
         return text
 
-    text_content = TextContent(type="text", text=_fmt_exec(result))
+    text_content = TextContent(type="text", text=notice + _fmt_exec(result))
     if not capture_after:
         return [text_content]
 

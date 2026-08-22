@@ -47,6 +47,10 @@ _CTX_TOGGLES = (
 _result_box = {"ready": False, "text": "", "error": False}
 _worker = None
 
+# 直前の送信で見たファイル世代（None = まだ一度も送っていない）。
+# bridge_server が採番し、パネルは「自分が前回見た値」だけを持つ。
+_last_sent_generation = None
+
 # 折り返し結果のキャッシュ（draw は redraw のたびに走るため、直近1件だけ持つ）
 _wrap_cache = {"key": None, "lines": ()}
 
@@ -557,6 +561,11 @@ def _poll_result():
         _result_box = {"ready": False, "text": "", "error": False}
         _tag_redraw()
         return None  # timer 終了
+    if _worker and _worker.is_alive() and wm.claude_bridge_status != "WORKING":
+        # ファイルロードで WM プロパティは default("IDLE") に戻るが、_worker は
+        # プロセス内グローバルなので生き残る。表示だけ「送れる顔」に戻ると、押した先の
+        # execute() で弾かれる。実態へ戻すのは timer 側（draw の中で RNA を書かない）。
+        wm.claude_bridge_status = "WORKING"
     _tag_redraw()
     return 0.5
 
@@ -589,8 +598,25 @@ class CLAUDE_OT_send(bpy.types.Operator):
                       "Only the source label \"[Sent from Blender]\" and "
                       "checked context directives are added — nothing hidden")
 
+    def invoke(self, context, event):
+        # 前回の送信から別の .blend が開かれていたら、送る前に一度だけ確かめる。
+        # 弾かない——「この依頼を今のファイルへ送っていいか」の判断は人に残す。
+        if (_last_sent_generation is not None
+                and bridge_server.current_generation() != _last_sent_generation):
+            return context.window_manager.invoke_props_dialog(self, width=420)
+        return self.execute(context)
+
+    def draw(self, context):
+        # 確認ダイアログの中身（invoke が invoke_props_dialog を開いた時だけ描かれる）。
+        # OK なら execute へ、キャンセル・Esc なら送らずに終わる。
+        layout = self.layout
+        layout.label(text="The .blend file was switched since your last request.",
+                     translate=False)
+        layout.label(text="Send this request against the current file?",
+                     translate=False)
+
     def execute(self, context):
-        global _worker
+        global _worker, _last_sent_generation
         wm = context.window_manager
         if not bridge_server.is_running():
             self.report({"ERROR"}, "Cannot send: bridge is not running")
@@ -607,6 +633,8 @@ class CLAUDE_OT_send(bpy.types.Operator):
         full_prompt = _build_prompt(prompt, directives)
         wm.claude_bridge_status = "WORKING"
         wm.claude_bridge_reply = ""
+        # この送信が見た世代を覚える。次の確認は、この後に切り替わった時だけ出る
+        _last_sent_generation = bridge_server.current_generation()
         _worker = threading.Thread(target=_run_claude, args=(full_prompt,), daemon=True)
         _worker.start()
         # persistent=True: 応答待ち中にファイルを開いても poll を生かす
@@ -824,7 +852,7 @@ classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_OT_clear_log,
 
 _WM_PROPS = ("claude_bridge_prompt", "claude_bridge_status",
              "claude_bridge_reply", "claude_bridge_usage",
-             "claude_bridge_collapsed") + tuple(
+             "claude_bridge_collapsed", "claude_bridge_generation") + tuple(
     prop for prop, _label, _text in _CTX_TOGGLES)
 
 
@@ -836,6 +864,9 @@ def register():
     bpy.types.WindowManager.claude_bridge_usage = bpy.props.StringProperty(default="")
     bpy.types.WindowManager.claude_bridge_collapsed = bpy.props.BoolProperty(
         name="Collapse", description="Collapse the reply to the first 8 lines", default=False)
+    # ファイル切替の印。WM プロパティはファイルを開くと default に戻り、保存では戻らない。
+    # そのズレを bridge_server.current_generation() が世代へ変える（UI には出さない）
+    bpy.types.WindowManager.claude_bridge_generation = bpy.props.IntProperty(default=0)
     for prop, label, text in _CTX_TOGGLES:
         setattr(bpy.types.WindowManager, prop, bpy.props.BoolProperty(
             name=label, description=text, default=False))
@@ -844,8 +875,13 @@ def register():
 
 
 def unregister():
+    global _last_sent_generation
+
     if bpy.app.timers.is_registered(_poll_result):
         bpy.app.timers.unregister(_poll_result)
+    # 世代は bridge の起動単位で 1 から振り直される。パネルが古い採番を覚えたまま
+    # 再有効化されると、次の1回を「切り替わった」と誤って言う。
+    _last_sent_generation = None
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
     for prop in _WM_PROPS:
