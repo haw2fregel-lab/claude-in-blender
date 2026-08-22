@@ -278,6 +278,19 @@ def test_a_missing_window_manager_keeps_the_last_generation(
 
 
 # --- 契約2: パネルの確認 ---
+# 見ているのは「ユーザーに確認が出るか」。だから状態もユーザーの手順で作る——
+# 一度送る、別の .blend を開く、もう一度送ろうとする。
+# 世代を覚えるのは実装の仕事なので、テストからは触らずに送信で覚えさせる。
+
+
+def _send_once(window_manager, sent):
+    """一度依頼を送った状態を作る。以降の「前回の送信」はこれを指す。"""
+    operator = panel.CLAUDE_OT_send()
+    operator.invoke(_context(), _EVENT)
+    _settle()
+    assert _confirm_calls(window_manager) == [], "前提: 初回は確認が出ない"
+    assert sent, "前提: 初回送信はそのまま送られる"
+    return operator
 
 
 def test_the_first_send_does_not_ask_for_confirmation(window_manager, sent):
@@ -290,28 +303,19 @@ def test_the_first_send_does_not_ask_for_confirmation(window_manager, sent):
     assert sent, "契約2: 確認が要らない時は従来どおり送信する"
 
 
-def test_a_send_after_a_file_switch_asks_before_running(
-    window_manager, sent, monkeypatch
-):
-    monkeypatch.setattr(
-        panel, "_last_sent_generation", bridge_server.current_generation()
-    )
+def test_a_send_after_a_file_switch_asks_before_running(window_manager, sent):
+    operator = _send_once(window_manager, sent)
+    sent_so_far = list(sent)
 
     window_manager.simulate_file_load()
-    panel.CLAUDE_OT_send().invoke(_context(), _EVENT)
-    _settle()
+    operator.invoke(_context(), _EVENT)
 
     assert _confirm_calls(window_manager), "契約2: 切替後の送信では確認を出す"
-    assert sent == [], "契約2: 確認より先に送信しない"
+    assert sent == sent_so_far, "契約2: 確認より先に送信しない"
 
 
-def test_the_confirmation_says_the_blend_file_was_switched(
-    window_manager, sent, monkeypatch
-):
-    monkeypatch.setattr(
-        panel, "_last_sent_generation", bridge_server.current_generation()
-    )
-    operator = panel.CLAUDE_OT_send()
+def test_the_confirmation_says_the_blend_file_was_switched(window_manager, sent):
+    operator = _send_once(window_manager, sent)
 
     window_manager.simulate_file_load()
     operator.invoke(_context(), _EVENT)
@@ -324,39 +328,50 @@ def test_the_confirmation_says_the_blend_file_was_switched(
 
 
 def test_a_confirmed_send_does_not_ask_again_until_the_next_file_load(
-    window_manager, sent, monkeypatch
+    window_manager, sent
 ):
-    """OK を押した後 = 送信が実行され、marker が今の世代になった後の状態。"""
-    bridge_server.current_generation()
+    operator = _send_once(window_manager, sent)
     window_manager.simulate_file_load()
-    monkeypatch.setattr(
-        panel, "_last_sent_generation", bridge_server.current_generation()
-    )
+    operator.invoke(_context(), _EVENT)
+    assert _confirm_calls(window_manager), "前提: 切替後の最初の送信では確認が出る"
 
-    panel.CLAUDE_OT_send().invoke(_context(), _EVENT)
+    operator.execute(_context())  # OK を押す = Blender が execute を呼ぶ
     _settle()
-    assert _confirm_calls(window_manager) == [], (
+    confirmed = len(_confirm_calls(window_manager))
+    operator.invoke(_context(), _EVENT)
+
+    assert len(_confirm_calls(window_manager)) == confirmed, (
         "契約2: 一度 OK を押したら、同じファイルで居る限り再度出さない"
     )
 
     window_manager.simulate_file_load()
-    panel.CLAUDE_OT_send().invoke(_context(), _EVENT)
+    operator.invoke(_context(), _EVENT)
 
-    assert _confirm_calls(window_manager), "契約2: 次のロードでは再び確認を出す"
+    assert len(_confirm_calls(window_manager)) > confirmed, (
+        "契約2: 次のロードでは再び確認を出す"
+    )
 
 
-def test_a_sent_request_records_the_generation_it_was_sent_against(
-    window_manager, sent
-):
-    """契約2: 送信を実行したら _last_sent_generation を現在の世代で更新する。
+def test_a_cancelled_confirmation_keeps_asking_on_the_next_send(window_manager, sent):
+    """送った依頼だけが世代を覚える。キャンセルした依頼は覚えない。
 
-    ここが無いと「OK を押しても毎回確認が出る」になる。
+    キャンセルで覚えてしまうと、切替の報せがそこで消える。ユーザーは
+    「切り替わった」と知らされないまま次の依頼を送ることになる。
     """
-    panel.CLAUDE_OT_send().invoke(_context(), _EVENT)
-    _settle()
+    operator = _send_once(window_manager, sent)
+    window_manager.simulate_file_load()
+    operator.invoke(_context(), _EVENT)
+    assert _confirm_calls(window_manager), "前提: 切替後の最初の送信では確認が出る"
 
-    assert sent, "前提: 初回送信は確認なしで送られる"
-    assert panel._last_sent_generation == bridge_server.current_generation()
+    # ここで OK を押さない。Blender は execute を呼ばずに終わる。
+    confirmed = len(_confirm_calls(window_manager))
+    sent_so_far = list(sent)
+    operator.invoke(_context(), _EVENT)
+
+    assert len(_confirm_calls(window_manager)) > confirmed, (
+        "契約2: 送らなかったのだから、次の送信でも確認は出る"
+    )
+    assert sent == sent_so_far, "契約2: キャンセルした依頼は送らない"
 
 
 # --- 契約3: bridge の通知 ---
