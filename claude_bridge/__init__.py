@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Claude Bridge — Blender から Claude Code の継続セッションに依頼を送る。
+"""Claude Bridge — Blender から Claude Code セッションの写し（fork）に依頼を送る。
 
 インストール:
   1. Edit > Preferences > Get Extensions → 右上メニュー → Install from Disk で zip を選ぶ

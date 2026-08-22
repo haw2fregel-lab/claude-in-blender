@@ -2,28 +2,32 @@
 
 **English** | [日本語](README.ja.md)
 
-**Ask your Claude Code — from inside Blender.** Same session, same context, same CLAUDE.md.
+**Ask your Claude Code — from inside Blender.** Same context, same CLAUDE.md — in a forked session of its own. The original conversation is never touched.
 
-claude-in-blender opens a small window in Blender's N-panel and sends your requests straight into the Claude Code session you're already using. The connection runs in reverse: Claude does the work by driving Blender directly through the bundled MCP server — your desktop conversation, continued, without leaving Blender.
+claude-in-blender opens a small window in Blender's N-panel and sends your requests straight into the Claude Code session you're already using. The connection runs in reverse: Claude does the work by driving Blender directly through the bundled MCP server — your desktop conversation carried over, without leaving Blender.
 
 Everything lives in this repository: a Blender add-on + a bundled MCP server + your Claude Code. That's the whole stack.
 
-> Work in progress (prototype v0.17.0). 1.0.0 will be the first public release. Tested on: Blender 5.1.2 / Claude Code 2.1.228 / Windows (macOS/Linux untested)
+> **v0.17.0** — Work in progress (prototype). 1.0.0 will be the first public release. Tested on: Blender 5.1.2 / Claude Code 2.1.228 / Windows (macOS/Linux untested)
 
 ## What it does
 
 - Send requests from the N-panel (sidebar "Claude" tab) in your everyday words
 - Context toggles — "target my selection", "check the scene info first", "look up the docs first", "check a screenshot first" — each one a single checkbox on your request
-- The responder is the **same session** as your desktop Claude Code — conversation context, your settings, and your CLAUDE.md all carry over
+- The responder is a **fork** of your desktop Claude Code session — conversation context, your settings, and your CLAUDE.md all carry over, and the original conversation is never written to
+- If you open a different `.blend` along the way, the panel asks before your next request, and Claude is told the file changed — nothing lands silently in the wrong file
 - Every line of code Claude runs is kept in **`claude_bridge_log`** in the Text editor — you can trace afterwards exactly what was done
 
 ## Security
 
-- **No extra keys to register** — authentication and usage both ride on your logged-in Claude Code account: subscription login runs on your subscription's quota, API accounts on API billing
-- The add-on never reads, stores, or transmits credentials (API keys, tokens)
-- Claude launched from the panel only gets the bundled MCP tools — Claude Code's file tools are never handed over
-- The endpoint binds to 127.0.0.1 only; connecting requires a session token
-- `execute_code` runs Python inside Blender — assume it can do anything the Blender process can do, because in principle it can. Set `CLAUDE_BRIDGE_EXECUTE=0` to disable it
+- **No extra keys to register** — authentication and usage both ride on your logged-in Claude Code account: subscription login runs on your subscription's quota, API accounts on API billing. The add-on never reads, stores, or transmits credentials
+- **Pressing Send is the approval.** Claude Code's own file and shell tools are switched off, but every bundled MCP tool is pre-approved for that request — there is no second confirmation once you send
+- **`execute_code` is not a sandbox** — it runs Python inside Blender, so assume it can do anything the Blender process can. `CLAUDE_BRIDGE_EXECUTE=0` disables it
+- **Claude can search this project's past sessions** (`search_session_history`), and the panel reads the same transcripts to list your recent sessions
+- **The log is saved inside your `.blend`** — `claude_bridge_log` keeps every line Claude ran and travels with the file. Clear it before sharing the file
+- The endpoint binds to 127.0.0.1 only and requires a session token — a boundary against other machines, not against other processes running as you
+
+**Read [SECURITY.md](SECURITY.md)** for the full trust boundary, where each kind of data lives, and how to turn things off.
 
 ## Requirements
 

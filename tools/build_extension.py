@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Build the Extension zip and verify its published metadata stays current."""
+import os
 import re
 import shutil
 import subprocess
@@ -37,17 +38,21 @@ def _build_zip(version: str) -> Path:
     return output
 
 
+# 版マーカーは宣言文から独立させる。"prototype" / "試作" は 1.0 公開で外れる語なので、
+# それを手がかりにすると公開作業そのもので版照合が割れる。
+VERSION_MARKER = re.compile(r"^> \*\*v([0-9]+(?:\.[0-9]+)+)\*\*", re.MULTILINE)
+
+
 def _readme_mismatches(version: str) -> list[str]:
-    """英語正面と日本語 .ja、二枚の README の版表記を manifest と照合する。"""
+    """英語正面と日本語 .ja、二枚の README の版マーカーを manifest と照合する。"""
     errors = []
-    for path, pattern, label in (
-        (README, r"prototype v([0-9]+(?:\.[0-9]+)+)", "README.md ('prototype vX.Y.Z')"),
-        (README_JA, r"試作 v([0-9]+(?:\.[0-9]+)+)", "README.ja.md ('試作 vX.Y.Z')"),
-    ):
-        text = path.read_text(encoding="utf-8")
-        match = re.search(pattern, text)
+    for path in (README, README_JA):
+        label = path.name
+        match = VERSION_MARKER.search(path.read_text(encoding="utf-8"))
         if not match:
-            errors.append(f"version marker was not found in {label}")
+            errors.append(
+                f"version marker was not found in {label} (expected a line starting with '> **vX.Y.Z**')"
+            )
         elif match.group(1) != version:
             errors.append(
                 f"{label} says v{match.group(1)}, but blender_manifest.toml is v{version}"
@@ -80,6 +85,15 @@ def _find_blender() -> str | None:
 def _validate_extension(archive: Path) -> int:
     blender = _find_blender()
     if not blender:
+        # CI では Blender を用意した上で検査する。「本当に無い」と「あるのに探索が
+        # 壊れている」を skip で同じ扱いにすると、検出が壊れても緑のままになる。
+        if os.environ.get("CLAUDE_BRIDGE_REQUIRE_BLENDER") == "1":
+            print(
+                "validate FAILED: Blender was required (CLAUDE_BRIDGE_REQUIRE_BLENDER=1) "
+                "but none was found",
+                file=sys.stderr,
+            )
+            return 1
         print("validate skipped (blender not found)")
         return 0
 
