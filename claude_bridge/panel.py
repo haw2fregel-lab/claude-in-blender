@@ -232,6 +232,13 @@ def _save_cwd(cwd):
             if data.get("cwd") == cwd:
                 return True
             data = dict(data)
+            previous_cwd = data.get("cwd")
+            if (not data.get("repo") and previous_cwd
+                    and (Path(previous_cwd) / "mcp_server" / "server.py").is_file()):
+                # 旧形式は cwd がアドオンのソース場所を兼ねていた。移る前に repo へ
+                # 昇格させないと、fallback 先が新しい作業ディレクトリになって
+                # MCP server を見失う。
+                data["repo"] = previous_cwd
             data["cwd"] = cwd
             data["session_id"] = None
             data.pop("fork_from", None)

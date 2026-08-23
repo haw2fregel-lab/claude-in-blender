@@ -10,6 +10,8 @@
 - パネルの描画: 作業ディレクトリ選択が無効になる条件（C-4）
 - 起動の argv: Skill Tool の入口と、許可するスキルの範囲
 - 打ち切り（timeout）: 届いていた session_id と本文を捨てない
+- 旧形式（`repo` の無い登録）から移る時の、アドオンの在り処の引き継ぎ（C-1 の後方互換）
+- 作業場所が動いた時に接続を外すこと。パネルだけでなく CLI の `--cwd-only` でも（C-4）
 
 登録の cwd は「Claude を起動する作業ディレクトリ」、repo は「アドオンのソースリポ」。
 この二つが別物になったのがこの案件で、テストもその二つを別のディレクトリで組む。
@@ -17,6 +19,7 @@
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import bpy
@@ -1002,4 +1005,393 @@ def test_a_timed_out_send_leaves_the_registration_alone_when_there_is_nothing_ne
     )
     assert path.read_text(encoding="utf-8") == original, (
         "契約2: 拾えた ID が既存と同じ、または一行も届いていない時は保存しに行かない"
+    )
+
+
+# --- C-1 後方互換: 旧形式から移る時、アドオンの場所を引き継ぐ ---
+# 旧登録は repo を持たず、cwd がアドオンのソース場所を兼ねていた（後方互換の fallback が
+# 見ているのがこの形）。ここから作業ディレクトリを別のリポへ移すと、repo の fallback 先が
+# 新しい作業リポになる。そこに mcp_server/server.py は無いので、以後の送信は C-5 の
+# 「add-on source not found」で止まる。アップデート済みの利用者が新機能を初めて使う本線が
+# これなので、移す前に旧 cwd を repo へ昇格させる。
+#
+# 昇格は CLI（bridge_register.main）とパネル（panel._save_cwd）の両方で起きる。
+# 作業ディレクトリが動く入口が二つあり、同じ穴がその二つに開いているため。
+
+_LEGACY_NAME = "legacy-cwd-that-held-the-addon"
+_OTHER_WORK_NAME = "another-work-repo"
+_MOVED_SOURCE_NAME = "moved-addon-source"
+
+# 外から登録された ID（既存の登録テストと同じ見本）。UUID の形ではないので掴み直す
+# 相手にはならず、fork 元としてだけ入る。
+_ENV_SESSION = "environment-session-12345678"
+
+
+def _create_dir(tmp_path, name):
+    """ただのディレクトリ。アドオンのソースは置かない。"""
+    (tmp_path / name).mkdir(parents=True, exist_ok=True)
+    return _posix(tmp_path / name)
+
+
+def _create_source_dir(tmp_path, name):
+    """アドオンのソースがある場所。目印は `mcp_server/server.py`（C-1）。"""
+    (tmp_path / name / "mcp_server").mkdir(parents=True, exist_ok=True)
+    (tmp_path / name / "mcp_server" / "server.py").write_text("", encoding="utf-8")
+    return _posix(tmp_path / name)
+
+
+def _is_same_place(registered, path):
+    """登録に書かれたパスが、その場所を指しているか。
+
+    登録は posix 区切りで書かれるが、昇格の時に何をどう写すかは実装の自由なので、
+    文字列ではなくパスとして比べる。
+    """
+    return registered is not None and Path(registered).resolve() == Path(path).resolve()
+
+
+@pytest.mark.parametrize(
+    ("make_path", "expected"),
+    [
+        pytest.param(
+            lambda tmp_path: _create_source_dir(tmp_path, _LEGACY_NAME),
+            True,
+            id="the-addon-server-lives-there",
+        ),
+        pytest.param(
+            lambda tmp_path: _create_addon_repo(tmp_path, with_server=False),
+            False,
+            id="mcp_server-without-the-server-file",
+        ),
+        pytest.param(
+            lambda tmp_path: _create_dir(tmp_path, _OTHER_WORK_NAME),
+            False,
+            id="a-plain-work-directory",
+        ),
+        pytest.param(
+            lambda tmp_path: _repo_path(tmp_path), False, id="the-path-does-not-exist"
+        ),
+    ],
+)
+def test_has_addon_source_asks_whether_the_addon_server_lives_there(
+    tmp_path, make_path, expected
+):
+    """契約: アドオンのソースリポかどうかを `mcp_server/server.py` の在否で見る。
+
+    送信前の存在チェック（C-5）と同じ目印を使う——昇格させた repo が、そのまま
+    送信の通る repo であること。
+    """
+    assert bridge_register.has_addon_source(make_path(tmp_path)) is expected
+
+
+def _run_register(monkeypatch, bridge_session_file, *arguments):
+    """`bridge_register.main()` を一度回して、書かれた登録を返す。
+
+    登録ファイルの置き場は import 時に決まるので、テストからは BRIDGE_FILE を差し替える
+    （既存 tests/test_bridge_register.py と同じ作法）。会話の特定は環境変数へ固定し、
+    ユーザー本物のセッション履歴は見に行かせない。
+    """
+    monkeypatch.setattr(bridge_register, "BRIDGE_FILE", bridge_session_file.path)
+    monkeypatch.setattr(bridge_register, "find_claude", lambda: "claude")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _ENV_SESSION)
+    monkeypatch.setattr(
+        bridge_register,
+        "latest_session",
+        lambda _cwd: (_ for _ in ()).throw(
+            AssertionError("環境変数があるのに、ユーザー本物の履歴を見に行った")
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["bridge_register.py", *arguments])
+
+    bridge_register.main()
+
+    return bridge_session_file.read()
+
+
+def test_the_cli_promotes_the_old_cwd_to_the_repo_when_the_work_place_moves(
+    monkeypatch, bridge_session_file, tmp_path
+):
+    """契約1: repo を持たない登録から移る時、旧 cwd をアドオンの在り処として引き継ぐ。"""
+    legacy = _create_source_dir(tmp_path, _LEGACY_NAME)
+    _register(bridge_session_file, cwd=legacy)  # repo キーの無い旧形式
+    moving_to = _create_work_dir(tmp_path)
+
+    data = _run_register(monkeypatch, bridge_session_file, "--cwd", moving_to)
+
+    assert _is_same_place(data["cwd"], moving_to), f"前提: 作業ディレクトリは移った: {data}"
+    assert _is_same_place(data.get("repo"), legacy), (
+        f"契約1: 移る前に、アドオンの在り処だった旧 cwd を repo へ昇格させる: {data}"
+    )
+
+
+@pytest.mark.parametrize(
+    "make_old_registration",
+    [
+        pytest.param(
+            lambda tmp_path: {"cwd": _create_dir(tmp_path, _LEGACY_NAME)},
+            id="the-old-cwd-was-just-a-work-directory",
+        ),
+        pytest.param(lambda _tmp_path: {}, id="there-was-no-old-cwd"),
+    ],
+)
+def test_the_cli_promotes_nothing_when_the_old_cwd_has_no_addon_source(
+    monkeypatch, bridge_session_file, tmp_path, make_old_registration
+):
+    """契約2: 旧 cwd にソースが無ければ昇格しない。repo は無いまま。
+
+    昇格の条件は「アドオンのソースがそこにある」の一つ。repo キーが無いことではない。
+    """
+    _register(bridge_session_file, **make_old_registration(tmp_path))
+
+    data = _run_register(
+        monkeypatch, bridge_session_file, "--cwd", _create_work_dir(tmp_path)
+    )
+
+    assert data.get("repo") is None, (
+        f"契約2: ソースの無い場所を repo として登録しない: {data}"
+    )
+
+
+def test_the_cli_does_not_overwrite_a_repo_that_is_already_registered(
+    monkeypatch, bridge_session_file, tmp_path
+):
+    """契約3: 既に repo がある登録では、昇格で上書きしない。
+
+    旧 cwd 側にもソースが残っている（アドオンのリポで作業していた）状態でも、
+    書いてある repo が正本。
+    """
+    registered_repo = _create_addon_repo(tmp_path)
+    _register(
+        bridge_session_file,
+        cwd=_create_source_dir(tmp_path, _LEGACY_NAME),
+        repo=registered_repo,
+    )
+
+    data = _run_register(
+        monkeypatch, bridge_session_file, "--cwd", _create_work_dir(tmp_path)
+    )
+
+    assert _is_same_place(data["repo"], registered_repo), (
+        f"契約3: 登録済みの repo を、旧 cwd の昇格で書き換えない: {data}"
+    )
+
+
+def test_an_explicit_repo_wins_over_the_promotion(
+    monkeypatch, bridge_session_file, tmp_path
+):
+    """契約4: `--repo` が明示された時はそちらが勝つ。"""
+    _register(bridge_session_file, cwd=_create_source_dir(tmp_path, _LEGACY_NAME))
+    chosen = _create_addon_repo(tmp_path)
+
+    data = _run_register(
+        monkeypatch,
+        bridge_session_file,
+        "--cwd",
+        _create_work_dir(tmp_path),
+        "--repo",
+        chosen,
+    )
+
+    assert _is_same_place(data["repo"], chosen), (
+        f"契約4: 人が名指しした repo を、旧 cwd の昇格で上書きしない: {data}"
+    )
+
+
+# パネル側も同じ四項目……ではなく三項目。`_save_cwd(cwd)` は cwd しか受けないので、
+# 「`--repo` が勝つ」（契約4）は CLI だけの話になる。
+
+
+def test_the_panel_promotes_the_old_cwd_to_the_repo_when_it_switches(
+    panel_window_manager, bridge_session_file, tmp_path
+):
+    """契約1（パネル）: 履歴から別の作業リポを選んだ時も、旧 cwd を引き継ぐ。"""
+    legacy = _create_source_dir(tmp_path, _LEGACY_NAME)
+    _register(bridge_session_file, cwd=legacy)
+    panel_window_manager()
+    moving_to = _create_work_dir(tmp_path)
+
+    assert panel._save_cwd(moving_to) is True, "前提: 切り替えそのものは成功する"
+
+    data = bridge_session_file.read()
+    assert _is_same_place(data["cwd"], moving_to), f"前提: 作業ディレクトリは移った: {data}"
+    assert _is_same_place(data.get("repo"), legacy), (
+        f"契約1: 旧 cwd がアドオンの在り処だったなら、移る前に repo へ昇格させる: {data}"
+    )
+
+
+@pytest.mark.parametrize(
+    "make_old_registration",
+    [
+        pytest.param(
+            lambda tmp_path: {"cwd": _create_dir(tmp_path, _LEGACY_NAME)},
+            id="the-old-cwd-was-just-a-work-directory",
+        ),
+        pytest.param(lambda _tmp_path: {}, id="there-was-no-old-cwd"),
+    ],
+)
+def test_the_panel_promotes_nothing_when_the_old_cwd_has_no_addon_source(
+    panel_window_manager, bridge_session_file, tmp_path, make_old_registration
+):
+    """契約2（パネル）: 旧 cwd にソースが無ければ昇格しない。"""
+    _register(bridge_session_file, **make_old_registration(tmp_path))
+    panel_window_manager()
+
+    assert panel._save_cwd(_create_work_dir(tmp_path)) is True, (
+        "前提: 切り替えそのものは成功する（昇格しないだけ）"
+    )
+
+    data = bridge_session_file.read()
+    assert data.get("repo") is None, (
+        f"契約2: ソースの無い場所を repo として登録しない: {data}"
+    )
+
+
+def test_the_panel_does_not_overwrite_a_repo_that_is_already_registered(
+    panel_window_manager, bridge_session_file, tmp_path
+):
+    """契約3（パネル）: 既に repo がある登録では、昇格で上書きしない。"""
+    registered_repo = _create_addon_repo(tmp_path)
+    _register(
+        bridge_session_file,
+        cwd=_create_source_dir(tmp_path, _LEGACY_NAME),
+        repo=registered_repo,
+    )
+    panel_window_manager()
+
+    assert panel._save_cwd(_create_work_dir(tmp_path)) is True, (
+        "前提: 切り替えそのものは成功する"
+    )
+
+    data = bridge_session_file.read()
+    assert _is_same_place(data["repo"], registered_repo), (
+        f"契約3: 登録済みの repo を、旧 cwd の昇格で書き換えない: {data}"
+    )
+
+
+# --- C-4 を CLI 側でも: `--cwd-only` でも作業場所が動けば接続を外す ---
+# パネルは「接続中は作業ディレクトリを切り替えられない」（C-4）。切り替えはセッションを
+# 外す操作なので、会話を切る意思表示（Disconnect）を先に人へ通す、という筋だった。
+# CLI の `--cwd-only` はそこだけ抜けていて、cwd を書き換えても session_id / fork_from を
+# 残す。Repo A で育った会話を接続中のまま Repo B で再開でき、画面は Connected のままで
+# 次の送信から別の CLAUDE.md・別の作業場所になる——誤リポ操作の入口。
+# `--cwd-only` の元の意味（同じ場所への再登録では会話を切らない）はそのまま残す。
+
+
+def _settle_a_connected_registration(monkeypatch, bridge_session_file, tmp_path):
+    """作業リポと repo を CLI で登録し、そこで会話が育った状態にして返す。
+
+    「動かない」側の値は CLI 自身が書いたものを使い回す——登録へ書く時の正規化は
+    実装の自由なので、同じ場所を指し直したことを文字列の作法に依らず作れる。
+    """
+    _run_register(
+        monkeypatch,
+        bridge_session_file,
+        "--cwd",
+        _create_work_dir(tmp_path),
+        "--repo",
+        _create_addon_repo(tmp_path),
+    )
+    settled = bridge_session_file.read()
+    _register(
+        bridge_session_file,
+        **{**settled, "session_id": _STORED_SESSION, "fork_from": _FORK_SOURCE},
+    )
+    return settled
+
+
+@pytest.mark.parametrize(
+    "move",
+    [
+        pytest.param(
+            lambda tmp_path, settled: (
+                "--cwd",
+                _create_dir(tmp_path, _OTHER_WORK_NAME),
+                "--repo",
+                settled["repo"],
+            ),
+            id="the-work-directory-moved",
+        ),
+        pytest.param(
+            lambda tmp_path, settled: (
+                "--cwd",
+                settled["cwd"],
+                "--repo",
+                _create_source_dir(tmp_path, _MOVED_SOURCE_NAME),
+            ),
+            id="the-addon-source-moved",
+        ),
+    ],
+)
+def test_cwd_only_drops_the_connection_when_the_place_moves(
+    monkeypatch, bridge_session_file, tmp_path, move
+):
+    """契約1 / 契約2: 場所が動いたら、`--cwd-only` でも接続を外す。
+
+    残したままだと、Repo A で育った会話が接続中のまま Repo B で再開できてしまう。
+    環境変数の ID を置いた状態で見ているので、外したついでに拾い直さないことも入る。
+    """
+    settled = _settle_a_connected_registration(
+        monkeypatch, bridge_session_file, tmp_path
+    )
+
+    data = _run_register(
+        monkeypatch, bridge_session_file, *move(tmp_path, settled), "--cwd-only"
+    )
+
+    # キー欠落と null は等価（登録は get で読む）——既存の登録まわりと同じ読み方。
+    assert data.get("session_id") is None, (
+        f"契約1: 作業場所が動いたら、続きの会話は切る: {data}"
+    )
+    assert data.get("fork_from") is None, (
+        f"契約1: fork 元も一緒に消す。残ると次の送信が別リポの会話から枝分かれする: {data}"
+    )
+
+
+def test_cwd_only_keeps_the_connection_when_neither_place_moves(
+    monkeypatch, bridge_session_file, tmp_path
+):
+    """契約3: 同じ場所への再登録なら接続はそのまま（`--cwd-only` の元の意味）。
+
+    作業のたびに登録を打ち直しても、育った会話が切れないための旗。
+    """
+    settled = _settle_a_connected_registration(
+        monkeypatch, bridge_session_file, tmp_path
+    )
+
+    data = _run_register(
+        monkeypatch,
+        bridge_session_file,
+        "--cwd",
+        settled["cwd"],
+        "--repo",
+        settled["repo"],
+        "--cwd-only",
+    )
+
+    assert data["session_id"] == _STORED_SESSION, (
+        f"契約3: 場所が動いていないので、繋がっている会話はそのまま: {data}"
+    )
+    assert data["fork_from"] == _FORK_SOURCE, (
+        f"契約3: fork 元も特定し直さない: {data}"
+    )
+
+
+def test_a_plain_registration_still_re_identifies_the_conversation(
+    monkeypatch, bridge_session_file, tmp_path
+):
+    """契約4: `--cwd-only` を付けない登録は従来どおり。
+
+    場所が動かなくても fork 元を特定し直し、session_id は None から始める。
+    「動かなければ接続を残す」を旗と関係なく効かせると、この筋が消える。
+    """
+    settled = _settle_a_connected_registration(
+        monkeypatch, bridge_session_file, tmp_path
+    )
+
+    data = _run_register(monkeypatch, bridge_session_file, "--cwd", settled["cwd"])
+
+    assert data["fork_from"] == _ENV_SESSION, (
+        f"契約4: 通常の登録は、いまの会話を fork 元として特定し直す: {data}"
+    )
+    assert data["session_id"] is None, (
+        f"契約4: 掴み直す相手ではなく fork 元なので、session_id は None: {data}"
     )

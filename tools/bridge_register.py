@@ -81,6 +81,11 @@ def push_recent(data, cwd, limit=5):
     data["recent_cwds"] = ordered[:limit]
 
 
+def has_addon_source(path):
+    """アドオンのソースリポか——パネルが起動する MCP server が居るかで見る。"""
+    return (Path(path) / "mcp_server" / "server.py").is_file()
+
+
 def find_claude():
     for name in ("claude", "claude.exe", "claude.cmd"):
         p = shutil.which(name)
@@ -120,6 +125,7 @@ def main():
             if not fork_from:
                 fork_from = latest_session(cwd)
 
+    dropped_connection = False
     with lock_bridge_file(BRIDGE_FILE):
         data = {}
         if BRIDGE_FILE.exists():
@@ -129,6 +135,8 @@ def main():
             except (OSError, json.JSONDecodeError):
                 data = {}
 
+        previous_cwd = data.get("cwd")
+        previous_repo = data.get("repo")
         push_recent(data, cwd)
         data.update({
             "cwd": cwd,
@@ -138,9 +146,21 @@ def main():
         })
         if repo is not None:
             data["repo"] = repo
+        elif (not previous_repo and previous_cwd
+              and has_addon_source(previous_cwd)):
+            # 旧形式は repo キーを持たず、cwd がアドオンのソース場所を兼ねていた。
+            # そこから作業ディレクトリを移す時、旧 cwd を repo へ昇格させないと
+            # ソースの場所を見失う（fallback 先が新しい作業リポになってしまう）。
+            data["repo"] = previous_cwd
         if not args.cwd_only:
             data["fork_from"] = fork_from
             data["session_id"] = None
+        elif data["cwd"] != previous_cwd or data.get("repo") != previous_repo:
+            # --cwd-only でも、作業場所が動くなら接続は外す。パネルは接続中の
+            # 切り替えを塞いでいるので、CLI だけ会話を持ち越せると契約が割れる。
+            data["session_id"] = None
+            data.pop("fork_from", None)
+            dropped_connection = True
         temp_file = BRIDGE_FILE.with_suffix(".json.tmp")
         temp_file.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -149,7 +169,8 @@ def main():
     print(f"registered: {BRIDGE_FILE}")
     print(f"  cwd       : {cwd}")
     if args.cwd_only:
-        print("  session   : (変更なし)")
+        print("  session   : (接続を外した — 作業場所が変わったため)"
+              if dropped_connection else "  session   : (変更なし)")
     elif fork_from:
         if session_source == "env":
             print(f"  fork 元   : ...{fork_from[-8:]}  (セッション自動特定 (env); この ID の写しをパネル側に作る (fork))")

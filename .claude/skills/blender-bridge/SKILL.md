@@ -5,8 +5,13 @@ description: Blender パネルにこのセッションの写しを持たせ、�
 # 橋の繋ぎ直し
 
 Blender パネル（claude-in-blender）に、いま話しているこのセッションの写しを持たせる。
-同時に、**いま開いているリポがパネルの作業ディレクトリになる**——claude-in-blender の
-リポである必要はない。自分のプロジェクトで実行すれば、パネルからの依頼はそこで動く。
+同時に、**いま開いているリポがパネルの作業ディレクトリになる**。
+
+このスキルと `tools/bridge_register.py` は claude-in-blender リポの中にあるので、
+別のリポで Claude Code を開いてもここからは見えない。パネルの作業ディレクトリを
+別のリポにしたい時は、claude-in-blender で
+`python tools/bridge_register.py --cwd <path>` を実行するか、パネルのドロップダウンから
+選ぶ（一度登録すれば履歴に残る）。
 
 アドオンのソース（`--repo`）は `/blender-setup` が登録した値をそのまま使うので、
 ここでは触らない。まだ一度も setup していない環境では、先に `/blender-setup` へ。

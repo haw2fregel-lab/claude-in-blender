@@ -80,13 +80,14 @@ def test_register_explicit_session_id_becomes_the_fork_source(monkeypatch, tmp_p
     assert data["session_id"] is None
 
 
-def test_register_cwd_only_touches_neither_session_id_nor_fork_from(monkeypatch, tmp_path):
+def test_register_cwd_only_keeps_the_connection_when_the_place_does_not_move(monkeypatch, tmp_path):
     bridge_file = tmp_path / "claude" / "blender-bridge-session.json"
     bridge_file.parent.mkdir(parents=True)
     bridge_file.write_text(
         json.dumps(
             {
-                "cwd": "D:/old-project",
+                "cwd": str(tmp_path.resolve()).replace("\\", "/"),
+                "repo": str(tmp_path.resolve()).replace("\\", "/"),
                 "session_id": "11111111-1111-1111-1111-111111111111",
                 "fork_from": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             }
@@ -136,7 +137,7 @@ def test_register_replaces_non_object_bridge_config(
     data = json.loads(bridge_file.read_text(encoding="utf-8"))
     assert isinstance(data, dict)
     assert data["cwd"] == str(tmp_path.resolve()).replace("\\", "/")
-    # キー欠落と null は等価（panel は get で読む）。--cwd-only は接続情報に触らない。
+    # キー欠落と null は等価（panel は get で読む）。作業場所が動けば接続は外れる。
     assert data.get("session_id") is None
     assert data.get("fork_from") is None
     assert "registered:" in capsys.readouterr().out
