@@ -437,3 +437,283 @@ def test_repo_defaults_to_the_current_directory(tmp_path):
     assert payload["status"] == "ok"
     assert completed.returncode == 0
     assert set(payload["entries"]) == {forward}
+
+
+# --- 安全化の契約: 不明・競合では自動修復せず止まる／差し替えは temp + os.replace ---
+#
+# ここから下は、ユーザー共通の ~/.claude.json を壊さない側の契約を踏む。
+# 割り込みや差し替えの瞬間を作るために、CLI を薄い皮（python -c）ごしに走らせる。
+# 皮は stdout へ何も書かない——契約の「JSON 一行」を汚さない。
+
+
+# 対象ファイルを読み終えた直後——契約の「読み込み後〜書き込み前」の入口——に、
+# 別プロセスの書き換えを一度だけ差し込む皮。
+# 前提: CLI は対象ファイルの解析を json 経由で行う（json.load も内部で json.loads を呼ぶ）。
+INTRUDE_AFTER_READ = '''\
+import json
+import runpy
+import sys
+from pathlib import Path
+
+script, target, intrusion = sys.argv[1:4]
+sys.argv = [script] + sys.argv[4:]
+target_path = Path(target)
+pending = [Path(intrusion).read_text(encoding="utf-8")]
+real_loads = json.loads
+
+
+def loads(*args, **kwargs):
+    parsed = real_loads(*args, **kwargs)
+    if pending and isinstance(parsed, dict) and "projects" in parsed:
+        target_path.write_text(pending.pop(), encoding="utf-8")
+    return parsed
+
+
+json.loads = loads
+runpy.run_path(script, run_name="__main__")
+'''
+
+
+# os.replace の呼ばれ方を記録する皮。mode="crash" なら、対象ファイルへの差し替えの瞬間に落ちる。
+WATCH_REPLACE = '''\
+import json
+import os
+import runpy
+import sys
+from pathlib import Path
+
+script, mode, record, target = sys.argv[1:5]
+sys.argv = [script] + sys.argv[5:]
+record_path = Path(record)
+target_path = Path(target).resolve()
+calls = []
+real_replace = os.replace
+
+
+def replace(src, dst, **kwargs):
+    calls.append({"src": str(src), "dst": str(dst)})
+    record_path.write_text(json.dumps(calls), encoding="utf-8")
+    if mode == "crash" and Path(dst).resolve() == target_path:
+        raise OSError("simulated crash at the swap")
+    return real_replace(src, dst, **kwargs)
+
+
+os.replace = replace
+record_path.write_text("[]", encoding="utf-8")
+runpy.run_path(script, run_name="__main__")
+'''
+
+
+def _raw_servers_entry(value):
+    # _entry は list() に通すので、未知 schema の生値はここで直に置く。
+    entry = _entry(trust=False)
+    entry["enabledMcpjsonServers"] = value
+    return entry
+
+
+def _run_hooked(hook, hook_args, claude_json, repo, fix=True):
+    # 皮の argv 規約: [script, *皮の引数, *CLI の引数]。皮が script を runpy で起動する。
+    args = [
+        sys.executable,
+        "-c",
+        hook,
+        str(SCRIPT),
+        *hook_args,
+        "--claude-json",
+        str(claude_json),
+        "--repo",
+        str(repo),
+    ]
+    if fix:
+        args.append("--fix")
+    return subprocess.run(
+        args, cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8"
+    )
+
+
+def _payload(completed):
+    assert completed.stdout, (
+        f"stdout が空（契約は JSON 一発）: exit={completed.returncode} stderr={completed.stderr}"
+    )
+    return json.loads(completed.stdout)
+
+
+# 未知 schema は「なんとなく動く」のが一番危ない: 文字列と dict は `in` が素通りし、
+# 数値は `in` が TypeError で落ちる。どれも直そうとせず、書かずに止まるのが契約。
+@pytest.mark.parametrize(
+    "servers",
+    [SERVER, {SERVER: True}, 7],
+    ids=["string", "dict", "int"],
+)
+def test_unsupported_servers_type_stops_the_fix_without_writing(tmp_path, servers):
+    repo = _repo(tmp_path)
+    forward, _back = _forms(repo)
+    claude_json = _write(tmp_path, {"projects": {forward: _raw_servers_entry(servers)}})
+    before = claude_json.read_text(encoding="utf-8")
+
+    completed, payload = _run(claude_json, repo=repo, fix=True)
+
+    assert payload["status"] == "unsupported-schema"
+    assert completed.returncode == 0
+    assert set(payload) == {"status", "claude_json", "entries", "fixed", "backup"}
+    assert payload["fixed"] is False
+    assert payload["backup"] is None
+    assert claude_json.read_text(encoding="utf-8") == before
+    assert _backups(tmp_path) == []
+
+
+# --fix 無しは元から read-only。未知 schema でもそこは変わらない。
+# read-only 時の status は契約に無いので、ここでは固定しない（窓口の裁定待ち）。
+def test_unsupported_servers_type_without_fix_leaves_the_file_alone(tmp_path):
+    repo = _repo(tmp_path)
+    forward, _back = _forms(repo)
+    claude_json = _write(tmp_path, {"projects": {forward: _raw_servers_entry(SERVER)}})
+    before = claude_json.read_text(encoding="utf-8")
+
+    completed, payload = _run(claude_json, repo=repo)
+
+    assert completed.returncode == 0
+    # 裁定（2026-08-23）: 未知 schema は --fix の有無によらず入力状態の札として返す。
+    assert payload["status"] == "unsupported-schema"
+    assert payload["fixed"] is False
+    assert payload["backup"] is None
+    assert claude_json.read_text(encoding="utf-8") == before
+    assert _backups(tmp_path) == []
+
+
+# 境界: 止める対象は「list でも None でもない」値。null はその外側にいる。
+# null をどう直すかは契約に無いので、未知 schema 扱いしないことだけを見る。
+def test_a_null_servers_value_is_not_an_unsupported_schema(tmp_path):
+    repo = _repo(tmp_path)
+    forward, _back = _forms(repo)
+    claude_json = _write(tmp_path, {"projects": {forward: _raw_servers_entry(None)}})
+
+    completed, payload = _run(claude_json, repo=repo, fix=True)
+
+    assert completed.returncode == 0
+    assert payload["status"] != "unsupported-schema"
+
+
+# 読み込みと書き込みの間に別プロセスが書いていたら、その上に被せず conflict で降りる。
+def test_a_change_between_read_and_write_is_refused_as_conflict(tmp_path):
+    repo = _repo(tmp_path)
+    forward, _back = _forms(repo)
+    claude_json = _write(
+        tmp_path,
+        {"projects": {forward: _entry(trust=False, servers=[])}},
+    )
+    # 別プロセスが割り込んで書く内容。CLI が書かなければ、これがそのまま残る。
+    intruded_text = (
+        json.dumps(
+            {
+                "projects": {
+                    forward: _entry(trust=False, servers=[]),
+                    OTHER_PROJECT: _entry(trust=True, servers=[SERVER]),
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    intrusion = tmp_path / "intrusion.json"
+    intrusion.write_text(intruded_text, encoding="utf-8")
+
+    completed = _run_hooked(
+        INTRUDE_AFTER_READ, [str(claude_json), str(intrusion)], claude_json, repo
+    )
+    payload = _payload(completed)
+
+    assert payload["status"] == "conflict", (
+        f"読み込み後に変わっていたら書かずに降りる契約: {payload}"
+    )
+    assert completed.returncode == 0
+    assert set(payload) == {"status", "claude_json", "entries", "fixed", "backup"}
+    assert payload["fixed"] is False
+    # public な観測: 対象ファイルは割り込んだ側の内容のまま。CLI は一文字も書いていない。
+    assert claude_json.read_text(encoding="utf-8") == intruded_text
+
+
+# 書き込みは同一ディレクトリの一時ファイル → os.replace。対象ファイルを直接開いて書かない。
+def test_fix_swaps_the_file_in_with_os_replace_from_the_same_directory(tmp_path):
+    repo = _repo(tmp_path)
+    forward, _back = _forms(repo)
+    claude_json = _write(
+        tmp_path,
+        {
+            "installMethod": "native",
+            "projects": {
+                OTHER_PROJECT: _entry(trust=True, servers=[SERVER]),
+                forward: _entry(trust=False, servers=["other-server"]),
+            },
+        },
+    )
+    record = tmp_path / "replace-calls.json"
+
+    completed = _run_hooked(
+        WATCH_REPLACE, ["record", str(record), str(claude_json)], claude_json, repo
+    )
+    payload = _payload(completed)
+    calls = json.loads(record.read_text(encoding="utf-8"))
+    swaps = [
+        call for call in calls if Path(call["dst"]).resolve() == claude_json.resolve()
+    ]
+    data = json.loads(claude_json.read_text(encoding="utf-8"))
+
+    assert completed.returncode == 0
+    assert payload["fixed"] is True
+    assert swaps, f"対象ファイルへの os.replace が無い（直書きの合図）: {calls}"
+    for call in swaps:
+        assert Path(call["src"]).resolve().parent == claude_json.resolve().parent
+    # 結果整合: 差し替わったファイルは有効な JSON で、文書が丸ごとそろっている。
+    assert data["installMethod"] == "native"
+    assert data["projects"][OTHER_PROJECT] == _entry(trust=True, servers=[SERVER])
+    assert data["projects"][forward]["hasTrustDialogAccepted"] is True
+    assert data["projects"][forward]["enabledMcpjsonServers"] == ["other-server", SERVER]
+
+
+# 電源断の代役: 差し替えの瞬間に落ちても、対象ファイルは元のまま丸ごと残る。
+def test_a_crash_at_the_swap_leaves_the_original_file_whole(tmp_path):
+    repo = _repo(tmp_path)
+    forward, _back = _forms(repo)
+    claude_json = _write(
+        tmp_path,
+        {
+            "installMethod": "native",
+            "projects": {forward: _entry(trust=False, servers=["other-server"])},
+        },
+    )
+    before = claude_json.read_text(encoding="utf-8")
+    record = tmp_path / "replace-calls.json"
+
+    _completed = _run_hooked(
+        WATCH_REPLACE, ["crash", str(record), str(claude_json)], claude_json, repo
+    )
+    after = claude_json.read_text(encoding="utf-8")
+
+    # 落ちた後の姿だけを見る（落ち方の報告は契約の外）。
+    assert after == before, (
+        "差し替えで落ちても対象ファイルは元のまま——temp + os.replace ならこれは自明。"
+        " 崩れるなら、対象ファイルを直接開いて書いている合図。"
+    )
+    assert json.loads(after)["installMethod"] == "native"
+
+
+# 元ファイルの permission mode を差し替え後も保つ。
+# 0o640 は mkstemp の既定（0o600）とも umask 022 の既定（0o644）とも違う——写している証拠になる。
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX の permission mode を持たない"
+)
+def test_fix_keeps_the_permission_mode_of_the_target_file(tmp_path):
+    repo = _repo(tmp_path)
+    forward, _back = _forms(repo)
+    claude_json = _write(
+        tmp_path,
+        {"projects": {forward: _entry(trust=False, servers=[])}},
+    )
+    claude_json.chmod(0o640)
+
+    completed, payload = _run(claude_json, repo=repo, fix=True)
+
+    assert completed.returncode == 0
+    assert payload["fixed"] is True
+    assert claude_json.stat().st_mode & 0o777 == 0o640

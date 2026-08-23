@@ -3,8 +3,11 @@
 import argparse
 import codecs
 import json
+import os
 import shutil
+import stat
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +48,14 @@ def status_for(entries):
     return "missing"
 
 
+def has_unsupported_schema(projects, keys):
+    for key in keys:
+        servers = projects[key].get("enabledMcpjsonServers")
+        if servers is not None and not isinstance(servers, list):
+            return True
+    return False
+
+
 def backup_path_for(claude_json):
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     candidate = claude_json.with_name(f"{claude_json.name}.bak-{stamp}")
@@ -64,8 +75,49 @@ def enable_server(entry):
             servers.append(SERVER_NAME)
     elif servers is None:
         entry["enabledMcpjsonServers"] = [SERVER_NAME]
-    else:
-        entry["enabledMcpjsonServers"] = [servers, SERVER_NAME]
+
+
+def matches_raw(claude_json, expected_raw):
+    try:
+        return claude_json.read_bytes() == expected_raw
+    except OSError:
+        return False
+
+
+def write_atomically(claude_json, content, encoding, expected_raw):
+    try:
+        source_mode = stat.S_IMODE(claude_json.stat().st_mode)
+    except OSError:
+        return False
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding=encoding, dir=claude_json.parent,
+                prefix=f".{claude_json.name}.", suffix=".tmp",
+                delete=False) as temporary:
+            temp_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+
+        try:
+            os.chmod(temp_path, source_mode)
+        except OSError:
+            if os.name != "nt":
+                raise
+
+        if not matches_raw(claude_json, expected_raw):
+            return False
+        os.replace(temp_path, claude_json)
+        temp_path = None
+        return True
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def output(status, claude_json, entries, fixed=False, backup=None):
@@ -105,9 +157,16 @@ def main():
         return 0
     keys = project_keys(projects, repo)
     entries = entries_state(projects, keys)
+    if has_unsupported_schema(projects, keys):
+        output("unsupported-schema", claude_json, entries)
+        return 0
     status = status_for(entries)
     if not args.fix or status != "missing":
         output(status, claude_json, entries)
+        return 0
+
+    if not matches_raw(claude_json, raw):
+        output("conflict", claude_json, entries)
         return 0
 
     backup = backup_path_for(claude_json)
@@ -115,8 +174,10 @@ def main():
     for key in keys:
         enable_server(projects[key])
     encoding = "utf-8-sig" if raw.startswith(codecs.BOM_UTF8) else "utf-8"
-    claude_json.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                           encoding=encoding)
+    content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if not write_atomically(claude_json, content, encoding, raw):
+        output("conflict", claude_json, entries, backup=backup)
+        return 0
     entries = entries_state(projects, keys)
     status = status_for(entries)
     output(status, claude_json, entries, fixed=status == "ok", backup=backup)
