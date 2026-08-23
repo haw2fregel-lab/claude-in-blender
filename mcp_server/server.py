@@ -175,6 +175,30 @@ def _project_slug() -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd()))
 
 
+def _history_search_summary(
+    searched: int,
+    total: int,
+    too_large: int,
+    unreadable: int,
+    matches: int | None = None,
+) -> str:
+    """Format the observable scope of a session-history search."""
+    parts = [f"searched {searched} of {total} files"]
+    if matches is not None:
+        parts[0] += " (newest first)"
+    skipped = too_large + unreadable
+    if skipped:
+        skipped_parts = []
+        if too_large:
+            skipped_parts.append(f"too large: {too_large}")
+        if unreadable:
+            skipped_parts.append(f"unreadable: {unreadable}")
+        parts.append(f"skipped {skipped} ({', '.join(skipped_parts)})")
+    if matches is not None:
+        parts.append(f"showing {matches} matches")
+    return f"[{', '.join(parts)}]"
+
+
 def _message_text(record: dict) -> str:
     message = record.get("message")
     if not isinstance(message, dict):
@@ -486,6 +510,9 @@ def get_doc(identifier: str) -> str:
 def search_session_history(query: str, max_results: int = 8) -> str:
     """Search previous Claude Code session transcripts for this project.
 
+    Searches the newest 10 JSONL files, reading files up to 10 MiB each, and
+    returns at most 20 excerpts with roughly 4,000 characters of excerpt text.
+
     Args:
         query: Space-separated terms that all must appear in a message.
         max_results: Maximum number of matching excerpts to return.
@@ -504,21 +531,27 @@ def search_session_history(query: str, max_results: int = 8) -> str:
     try:
         project_dir = _PROJECTS_ROOT / _project_slug()
         if not project_dir.is_dir():
-            return no_match
+            return "Session history unavailable: project directory not found"
 
+        all_session_files = list(project_dir.glob("*.jsonl"))
         session_files = []
-        for path in project_dir.glob("*.jsonl"):
+        too_large = 0
+        unreadable = 0
+        for path in all_session_files:
             try:
                 stat_result = path.stat()
             except OSError:
+                unreadable += 1
                 continue
             # 10MB 超は候補に入れない（「新しい10件」の枠を skip で食わないよう、読む前に絞る）
             if stat_result.st_size > 10 * 1024 * 1024:
+                too_large += 1
                 continue
             session_files.append((stat_result.st_mtime, path))
 
         excerpts = []
         excerpt_length = 0
+        searched = 0
         for _, path in sorted(session_files, key=lambda item: item[0], reverse=True)[
             :10
         ]:
@@ -526,13 +559,29 @@ def search_session_history(query: str, max_results: int = 8) -> str:
                 with path.open(encoding="utf-8") as f:
                     lines = f.readlines()
             except (OSError, UnicodeError):
+                unreadable += 1
                 continue
 
+            records = []
+            nonempty_lines = 0
+            invalid_records = 0
             for line in reversed(lines):
+                if line.strip():
+                    nonempty_lines += 1
                 try:
                     record = json.loads(line)
                 except (TypeError, ValueError):
+                    if line.strip():
+                        invalid_records += 1
                     continue
+                records.append(record)
+
+            if nonempty_lines and invalid_records == nonempty_lines:
+                unreadable += 1
+                continue
+
+            searched += 1
+            for record in records:
                 if not isinstance(record, dict) or record.get("type") not in {
                     "user",
                     "assistant",
@@ -548,15 +597,40 @@ def search_session_history(query: str, max_results: int = 8) -> str:
                 formatted = f"[{path.stem[:8]} {_session_timestamp(record.get('timestamp'))} {record['type']}] {excerpt}"
                 if excerpt_length + len(formatted) + (1 if excerpts else 0) > 4000:
                     excerpts.append("... (truncated)")
-                    return "\n".join(excerpts)
+                    summary = _history_search_summary(
+                        searched,
+                        len(all_session_files),
+                        too_large,
+                        unreadable,
+                        len(excerpts) - 1,
+                    )
+                    return "\n".join([summary, *excerpts])
                 excerpts.append(formatted)
                 excerpt_length += len(formatted) + (1 if len(excerpts) > 1 else 0)
                 if len(excerpts) >= result_limit:
-                    return "\n".join(excerpts)
-    except Exception:
-        return no_match
+                    summary = _history_search_summary(
+                        searched,
+                        len(all_session_files),
+                        too_large,
+                        unreadable,
+                        len(excerpts),
+                    )
+                    return "\n".join([summary, *excerpts])
+    except Exception as exc:
+        return f"Session history unavailable: {type(exc).__name__}"
 
-    return "\n".join(excerpts) if excerpts else no_match
+    if not searched and all_session_files and unreadable:
+        return "Session history unavailable: all session files were unreadable"
+    if excerpts:
+        summary = _history_search_summary(
+            searched,
+            len(all_session_files),
+            too_large,
+            unreadable,
+            len(excerpts),
+        )
+        return "\n".join([summary, *excerpts])
+    return f"{no_match} {_history_search_summary(searched, len(all_session_files), too_large, unreadable)}"
 
 
 if __name__ == "__main__":
