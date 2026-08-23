@@ -34,6 +34,10 @@ _EXEC_TIMEOUT_S = 30
 _MAX_OUTPUT_BYTES = 1_000_000
 _SCREENSHOT_MAX_SIZE = 768
 _MAX_RESPONSE_BYTES = 50_000
+# Per-tool caps preserve list schemas before the generic response-size fuse.
+_MAX_SCENE_INFO_OBJECTS = 200
+_MAX_SELECTED_OBJECTS = 200
+_MAX_DOC_BYTES = 8_000
 _REQUEST_JOURNAL_LIMIT = 256
 _MAX_ERROR_BYTES = 2_048
 _FINAL_REQUEST_STATUSES = frozenset({"succeeded", "failed"})
@@ -391,8 +395,11 @@ def _with_file_switch(envelope, switched):
 def _cmd_get_scene_info(_params):
     start = time.monotonic()
     scene = bpy.context.scene
+    total_objects = len(scene.objects)
     objects = []
     for obj in scene.objects:
+        if len(objects) >= _MAX_SCENE_INFO_OBJECTS:
+            break
         objects.append(
             {
                 "name": obj.name,
@@ -403,16 +410,17 @@ def _cmd_get_scene_info(_params):
                 "visible": obj.visible_get(),
             }
         )
-    return _ok(
-        {
-            "scene_name": scene.name,
-            "objects": objects,
-            "frame_current": scene.frame_current,
-            "frame_start": scene.frame_start,
-            "frame_end": scene.frame_end,
-        },
-        start,
-    )
+    data = {
+        "scene_name": scene.name,
+        "objects": objects,
+        "total_objects": total_objects,
+        "frame_current": scene.frame_current,
+        "frame_start": scene.frame_start,
+        "frame_end": scene.frame_end,
+    }
+    if total_objects > _MAX_SCENE_INFO_OBJECTS:
+        data["objects_truncated"] = True
+    return _ok(data, start)
 
 
 def _cmd_execute_code(params):
@@ -545,11 +553,25 @@ def _cmd_get_viewport_screenshot(_params):
 def _cmd_get_selection(_params):
     start = time.monotonic()
     obj = bpy.context.active_object
-    selected_objects = [o.name for o in bpy.context.selected_objects]
+    selected = bpy.context.selected_objects
+    total_selected = len(selected)
+    selected_objects = []
+    for selected_obj in selected:
+        if len(selected_objects) >= _MAX_SELECTED_OBJECTS:
+            break
+        selected_objects.append(selected_obj.name)
 
     if not obj:
+        data = {
+            "mode": None,
+            "active_object": None,
+            "selected_objects": selected_objects,
+            "total_selected": total_selected,
+        }
+        if total_selected > _MAX_SELECTED_OBJECTS:
+            data["selection_truncated"] = True
         return _ok(
-            {"mode": None, "active_object": None, "selected_objects": selected_objects},
+            data,
             start,
         )
 
@@ -557,7 +579,10 @@ def _cmd_get_selection(_params):
         "mode": obj.mode,
         "active_object": obj.name,
         "selected_objects": selected_objects,
+        "total_selected": total_selected,
     }
+    if total_selected > _MAX_SELECTED_OBJECTS:
+        result["selection_truncated"] = True
 
     if obj.mode == "EDIT" and obj.type == "MESH":
         import bmesh
@@ -610,13 +635,33 @@ def _cmd_get_object_info(params):
     return _ok(info, start)
 
 
+def _cap_doc_text(data):
+    doc = data.get("doc")
+    if not isinstance(doc, str):
+        return data
+    if len(doc.encode("utf-8")) <= _MAX_DOC_BYTES:
+        return data
+    # UTF-8 の文字の途中で切らないため、bytes で切って ignore で戻す
+    data["doc"] = doc.encode("utf-8")[:_MAX_DOC_BYTES].decode("utf-8", errors="ignore")
+    data["doc_truncated"] = True
+    data["original_length"] = len(doc)
+    # 案内が無いと、切られた doc は実質取得不可になる——全文は Blender 内に
+    # 生きているので、取りにいく道をここで名指しする。
+    identifier = data.get("identifier")
+    if isinstance(identifier, str) and identifier:
+        data["full_doc_hint"] = (
+            f"Full text: run execute_code with result = {identifier}.__doc__"
+        )
+    return data
+
+
 def _cmd_get_doc(params):
     start = time.monotonic()
     try:
         data = lookup_doc(params.get("identifier"))
     except DocLookupError as e:
         return _err(str(e), start=start)
-    return _ok(data, start)
+    return _ok(_cap_doc_text(data), start)
 
 
 _HANDLERS = {

@@ -21,7 +21,6 @@ _ALLOWED_ROOTS = frozenset(_ROOT_MODULES)
 _MAX_MATCHES = 30
 _MAX_MEMBERS = 100
 _MAX_WILDCARD_MEMBERS = 200
-_MAX_DOC_CHARS = 2000
 
 
 class DocLookupError(Exception):
@@ -116,12 +115,13 @@ def lookup_doc(identifier):
             "truncated": len(members) > _MAX_WILDCARD_MEMBERS,
         }
 
+    # doc 本文はここでは切らない。応答サイズの契約は封筒を組む handler 側
+    # （bridge_server._cmd_get_doc）が持つ。
     raw_doc = getattr(obj, "__doc__", None) or "No documentation available"
     return {
         "identifier": identifier,
         "type": type(obj).__name__,
-        "doc": raw_doc[:_MAX_DOC_CHARS],
-        "doc_truncated": len(raw_doc) > _MAX_DOC_CHARS,
+        "doc": raw_doc,
         "members": members[:_MAX_MEMBERS],
         "total_members": len(members),
         "truncated": len(members) > _MAX_MEMBERS,

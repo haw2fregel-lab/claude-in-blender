@@ -321,3 +321,306 @@ def test_a_healthy_bridge_reports_no_startup_reason(bridge_tcp):
     assert _startup_error() is None
 
 
+# --- 契約: 大きいシーンでも tool 応答の構造が保たれる（票E 契約1–3 / 完了条件 (a)–(d)） ---
+# 上の generic 安全弁（data 全体を JSON 文字列化して切る）は最後の砦として残る。
+# ここで見るのはその手前——tool ごとに件数・bytes で切り、有効な JSON 構造のまま返すこと。
+
+MAX_LIST_ITEMS = 200  # objects / selection の上限（票E 契約1・2）
+MAX_DOC_BYTES = 8_000  # doc 本文の上限（票E 契約3、2026-08-23 ユーザー裁定で 8KB）
+FAKE_SCENE_NAME = "TruncationScene"
+# 選択一覧を運ぶ field 名と get_doc の params 名は既存 schema 側の決めどころ。
+# 票E が縛るのは件数・bytes と total_* / *_truncated / original_length の付き方なので、
+# 名前には踏み込まない。別名なら、下の定数を直せば残りは通る。
+SELECTION_LIST_KEYS = ("selected_objects", "objects", "selected", "selection")
+DOC_TARGET = "bpy.ops.mesh.primitive_cube_add"
+DOC_PARAMS = {"identifier": DOC_TARGET}
+# doc 本文の埋め草は ASCII。JSON へ入れた時の膨らみ（\uXXXX 化）で 50KB 安全弁を踏むと、
+# 見たい切り詰めの手前で別の仕組みが働いてしまう。マルチバイトは切り口へ狙って置く。
+DOC_FILL_CHAR = "あ"  # UTF-8 で 3 bytes
+DOC_HEAD = "HEAD:"
+DOC_TAIL = ":TAIL"
+UTF8_REPLACEMENT = chr(0xFFFD)  # 壊れた UTF-8 を decode した時に出る印
+
+
+class FakeVector(list):
+    """`mathutils.Vector` の身代わり。list として JSON に入り、`.x/.y/.z` でも読める。"""
+
+    @property
+    def x(self):
+        return self[0]
+
+    @property
+    def y(self):
+        return self[1]
+
+    @property
+    def z(self):
+        return self[2]
+
+
+class FakeSceneObject:
+    """`bpy.types.Object` の身代わり——応答に載る field だけを実物型で持つ。
+
+    conftest の bpy は MagicMock なので、素の object は mock を返して応答を JSON にできない
+    （test_bridge_server_tcp.py の fake_blend_file と同じ寄せ方）。
+    """
+
+    def __init__(self, name, obj_type="MESH", visible=True, offset=0.0):
+        self.name = name
+        self.type = obj_type
+        self.location = FakeVector((offset, 0.0, 0.0))
+        self.rotation_euler = FakeVector((0.0, 0.0, 0.0))
+        self.scale = FakeVector((1.0, 1.0, 1.0))
+        self.mode = "OBJECT"  # active_object になった時に get_selection が読む
+        self._visible = visible
+
+    def visible_get(self):
+        return self._visible
+
+
+def _entry_names(entries):
+    """一覧の各要素から名前を取る。要素の形（dict か name の str か）は問わない。"""
+    return [entry if isinstance(entry, str) else entry["name"] for entry in entries]
+
+
+def _selection_entries(data):
+    """選択オブジェクトの一覧を持つ field を data から引く。"""
+    found = [key for key in SELECTION_LIST_KEYS if isinstance(data.get(key), list)]
+    assert len(found) == 1, (
+        f"選択一覧の field を特定できない: keys={sorted(data)} / 候補={SELECTION_LIST_KEYS}"
+    )
+    return data[found[0]]
+
+
+def _doc_text(data):
+    """doc 本文を data から引く——一番長い文字列 field を本文とみなす。
+
+    fixture は本文だけを飛び抜けて長く作るので、field 名を知らなくても特定できる。
+    """
+    bodies = [value for value in data.values() if isinstance(value, str)]
+    assert bodies, f"doc 応答に文字列 field が無い: keys={sorted(data)}"
+    return max(bodies, key=len)
+
+
+def _doc_body_of(size_bytes, multibyte_at):
+    """`multibyte_at` byte 目から 3 bytes 文字が始まる、指定 bytes ちょうどの doc 本文。"""
+    filler = size_bytes - len(DOC_HEAD) - len(DOC_TAIL) - len(DOC_FILL_CHAR.encode("utf-8"))
+    before = multibyte_at - len(DOC_HEAD)
+    after = filler - before
+    assert before >= 0 and after >= 0, f"印が入らない: {size_bytes} bytes / offset {multibyte_at}"
+    body = DOC_HEAD + "x" * before + DOC_FILL_CHAR + "x" * after + DOC_TAIL
+    assert len(body.encode("utf-8")) == size_bytes
+    return body
+
+
+def _cuts_mid_character(text, limit_bytes):
+    """`limit_bytes` で素朴に byte 切りすると、文字の途中へ落ちるか。"""
+    try:
+        text.encode("utf-8")[:limit_bytes].decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _install_json_safe_scene(monkeypatch):
+    """scene の見出し（name / frame_*）を JSON にできる実物型へ寄せる。"""
+    monkeypatch.setattr(bpy.context.scene, "name", FAKE_SCENE_NAME)
+    monkeypatch.setattr(bpy.context.scene, "frame_current", 1)
+    monkeypatch.setattr(bpy.context.scene, "frame_start", 1)
+    monkeypatch.setattr(bpy.context.scene, "frame_end", 250)
+
+
+@pytest.fixture
+def fake_scene_objects(monkeypatch):
+    """`bpy.context.scene.objects` を、指定した数の軽量オブジェクトへ寄せる factory。
+
+    件数は案件ごとに違うので、呼ぶ側が渡す。並べた順がそのまま「先頭 N 件」の順。
+    """
+
+    def install(count):
+        objects = [
+            FakeSceneObject(f"Obj.{index:04d}", offset=float(index)) for index in range(count)
+        ]
+        _install_json_safe_scene(monkeypatch)
+        monkeypatch.setattr(bpy.context.scene, "objects", objects)
+        return objects
+
+    return install
+
+
+@pytest.fixture
+def fake_selection(monkeypatch):
+    """選択オブジェクトの一覧を、指定した数の軽量オブジェクトへ寄せる factory。"""
+
+    def install(count):
+        objects = [
+            FakeSceneObject(f"Sel.{index:04d}", offset=float(index)) for index in range(count)
+        ]
+        active = objects[0] if objects else None
+        _install_json_safe_scene(monkeypatch)
+        monkeypatch.setattr(bpy.context, "selected_objects", objects)
+        monkeypatch.setattr(bpy.context, "active_object", active)
+        # view_layer 経由で選択を読む実装でも同じ答えになるように。
+        monkeypatch.setattr(bpy.context.view_layer.objects, "selected", objects)
+        monkeypatch.setattr(bpy.context.view_layer.objects, "active", active)
+        return objects
+
+    return install
+
+
+@pytest.fixture
+def fake_doc(monkeypatch):
+    """`lookup_doc` を、本文だけこちらが決める応答へ差し替える factory。
+
+    実際の bpy から doc を集める経路へ依存させないための seam。切り詰めが lookup_doc の
+    内側にある実装では、この差し替えが切り詰めごと外す——その時は本文が切れないので、
+    下のテストが「切った印が無い」と鳴る（seam を下げる合図）。
+    """
+    from claude_bridge import doc_lookup
+
+    def install(body):
+        calls = []
+
+        def lookup_doc(*args, **kwargs):
+            calls.append((args, kwargs))
+            # 実物 lookup_doc の返り形に合わせる（本文の切り詰めと案内は handler 側の仕事）
+            return {"identifier": DOC_TARGET, "doc": body}
+
+        monkeypatch.setattr(doc_lookup, "lookup_doc", lookup_doc)
+        # `from .doc_lookup import lookup_doc` で取り込む実装でも差し替わるように。
+        if hasattr(bridge_server, "lookup_doc"):
+            monkeypatch.setattr(bridge_server, "lookup_doc", lookup_doc)
+        return calls
+
+    return install
+
+
+def test_a_scene_over_the_cap_returns_a_capped_list_with_the_real_total(
+    bridge_tcp, fake_scene_objects
+):
+    fake_scene_objects(MAX_LIST_ITEMS)
+    small = bridge_tcp.send("get_scene_info", {})
+    objects = fake_scene_objects(MAX_LIST_ITEMS + 1)
+    truncated = bridge_tcp.send("get_scene_info", {})
+
+    assert small["ok"] is True, small.get("error")
+    assert truncated["ok"] is True, truncated.get("error")
+    data = truncated["data"]
+    assert {"objects", "total_objects"} <= set(data), (
+        f"scene_info の schema が壊れている（data ごと文字列化された疑い）: keys={sorted(data)}"
+    )
+    assert len(data["objects"]) == MAX_LIST_ITEMS
+    assert _entry_names(data["objects"]) == [obj.name for obj in objects[:MAX_LIST_ITEMS]]
+    assert data["total_objects"] == MAX_LIST_ITEMS + 1
+    assert data.get("objects_truncated") is True, f"切った印が無い: keys={sorted(data)}"
+    # 他の keys は不変——増えるのは切った印だけ。
+    assert set(data) == set(small["data"]) | {"objects_truncated"}
+    assert set(truncated) == set(small), "封筒の key が増減している"
+    assert data["scene_name"] == FAKE_SCENE_NAME
+    assert any(key.startswith("frame_") for key in data), f"frame_* が無い: keys={sorted(data)}"
+
+
+@pytest.mark.parametrize("count", [0, MAX_LIST_ITEMS])
+def test_a_scene_within_the_cap_keeps_the_total_without_a_truncated_flag(
+    bridge_tcp, fake_scene_objects, count
+):
+    objects = fake_scene_objects(count)
+
+    response = bridge_tcp.send("get_scene_info", {})
+
+    assert response["ok"] is True, response.get("error")
+    data = response["data"]
+    assert _entry_names(data["objects"]) == [obj.name for obj in objects]
+    # 切らない時も総数は常に載る（票E 契約1）。
+    assert data["total_objects"] == count
+    assert "objects_truncated" not in data, (
+        f"上限内なのに切った印が付いている: {data.get('objects_truncated')!r}"
+    )
+
+
+def test_a_selection_over_the_cap_returns_a_capped_list_with_the_real_total(
+    bridge_tcp, fake_selection
+):
+    fake_selection(MAX_LIST_ITEMS)
+    small = bridge_tcp.send("get_selection", {})
+    objects = fake_selection(MAX_LIST_ITEMS + 1)
+    truncated = bridge_tcp.send("get_selection", {})
+
+    assert small["ok"] is True, small.get("error")
+    assert truncated["ok"] is True, truncated.get("error")
+    data = truncated["data"]
+    entries = _selection_entries(data)
+    assert len(entries) == MAX_LIST_ITEMS
+    assert _entry_names(entries) == [obj.name for obj in objects[:MAX_LIST_ITEMS]]
+    assert data.get("total_selected") == MAX_LIST_ITEMS + 1, f"keys={sorted(data)}"
+    assert data.get("selection_truncated") is True, f"切った印が無い: keys={sorted(data)}"
+    assert set(data) == set(small["data"]) | {"selection_truncated"}
+    assert set(truncated) == set(small), "封筒の key が増減している"
+
+
+@pytest.mark.parametrize("count", [0, MAX_LIST_ITEMS])
+def test_a_selection_within_the_cap_keeps_the_total_without_a_truncated_flag(
+    bridge_tcp, fake_selection, count
+):
+    objects = fake_selection(count)
+
+    response = bridge_tcp.send("get_selection", {})
+
+    assert response["ok"] is True, response.get("error")
+    data = response["data"]
+    assert _entry_names(_selection_entries(data)) == [obj.name for obj in objects]
+    # 切らない時も総数は常に載る（票E 契約2）。
+    assert data.get("total_selected") == count, f"keys={sorted(data)}"
+    assert "selection_truncated" not in data, (
+        f"上限内なのに切った印が付いている: {data.get('selection_truncated')!r}"
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [MAX_DOC_BYTES + 16, MAX_DOC_BYTES * 3])
+def test_an_oversized_doc_is_capped_without_breaking_a_multibyte_character(
+    bridge_tcp, fake_doc, size_bytes
+):
+    original = _doc_body_of(size_bytes, multibyte_at=MAX_DOC_BYTES - 1)
+    assert _cuts_mid_character(original, MAX_DOC_BYTES), "切り口が文字の途中に無い本文"
+    calls = fake_doc(original)
+
+    response = bridge_tcp.send("get_doc", DOC_PARAMS)
+
+    assert response["ok"] is True, response.get("error")
+    assert calls, f"lookup_doc まで届いていない（params 名が違う疑い）: {DOC_PARAMS}"
+    data = response["data"]
+    body = _doc_text(data)
+    assert data.get("doc_truncated") is True, f"切った印が無い: keys={sorted(data)}"
+    # original_length は切る前の文字数（bytes ではない）。
+    assert data.get("original_length") == len(original), f"keys={sorted(data)}"
+    # 案内が無いと切られた doc は実質取得不可（2026-08-23 ユーザー裁定）。
+    hint = data.get("full_doc_hint", "")
+    assert DOC_TARGET in hint and "__doc__" in hint, f"全文への案内が無い: {hint!r}"
+    body_bytes = len(body.encode("utf-8"))
+    assert body_bytes <= MAX_DOC_BYTES
+    assert body_bytes >= MAX_DOC_BYTES - len(DOC_FILL_CHAR.encode("utf-8")), (
+        f"上限 {MAX_DOC_BYTES} bytes に対して切りすぎ: {body_bytes} bytes"
+    )
+    assert UTF8_REPLACEMENT not in body, "UTF-8 の途中で切れて置換文字が出ている"
+    assert body.startswith(DOC_HEAD)
+    assert DOC_TAIL not in body
+    assert original.startswith(body), (
+        "本文が頭からの切り出しになっていない（末尾へ印を足す実装なら契約側の追記が要る）"
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [MAX_DOC_BYTES // 4, MAX_DOC_BYTES])
+def test_a_doc_within_the_byte_limit_comes_back_whole(bridge_tcp, fake_doc, size_bytes):
+    # ちょうど 40,000 bytes は「超」ではない——完了条件 (d) は「40KB 超で本文が切れ」。
+    original = _doc_body_of(size_bytes, multibyte_at=len(DOC_HEAD))
+    fake_doc(original)
+
+    response = bridge_tcp.send("get_doc", DOC_PARAMS)
+
+    assert response["ok"] is True, response.get("error")
+    data = response["data"]
+    assert _doc_text(data) == original
+    # 切った時だけ足す（票E 契約3）。
+    assert "doc_truncated" not in data
+    assert "original_length" not in data
+    assert "full_doc_hint" not in data
