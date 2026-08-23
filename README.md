@@ -44,6 +44,8 @@ Everything you need to add lives in this repository: a Blender add-on + a bundle
 
 Want the panel to carry the context of another conversation? Say **connect Blender** (`/blender-bridge`). The panel forks that session and works from the copy — nothing is ever appended to the original session.
 
+Modeling know-how ships as a Skill ([`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)). Requests sent from the panel read it once per session — where names and enums moved in Blender 5.x, how data names behave under a translated UI, how to verify Geometry Nodes. **Feel free to copy it into your own repositories for Blender work elsewhere.**
+
 ## License
 
 [GPL-3.0-or-later](LICENSE). As a Blender add-on (using bpy), it follows Blender's own GPL.
