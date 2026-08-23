@@ -5,10 +5,11 @@
 封筒 {"ok", "data"/"error", "elapsed_ms"} を1行で返す。
 ソケットは別スレッドが持ち、bpy を触るのはタイマー経由のメインスレッドだけ。
 
-公開 API: start_server() / stop_server() / is_running() / clear_exec_log()
-        / current_generation()
+公開 API: start_server() / stop_server() / is_running() / get_startup_error()
+        / clear_exec_log() / current_generation()
 """
 
+import errno
 import json
 import os
 import secrets
@@ -73,6 +74,7 @@ _current_exec_request_id = None
 _request_journal = OrderedDict()
 _blocked_request_id = None
 _port = _DEFAULT_PORT
+_startup_error = None
 
 _TMP_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender")
 _TOKEN_FILE = os.path.join(_TMP_DIR, "blender-session-token")
@@ -96,6 +98,15 @@ def _err(message, tb=None, start=None):
     elapsed = round((time.monotonic() - start) * 1000) if start else 0
     return {"ok": False, "error": error, "elapsed_ms": elapsed}
 
+
+def _startup_error_message(error):
+    address_in_use = {
+        errno.EADDRINUSE,
+        getattr(errno, "WSAEADDRINUSE", 10048),
+    }
+    if isinstance(error, OSError) and error.errno in address_in_use:
+        return f"Port {_port} busy"
+    return "Bridge failed to start"
 
 # ── Request journal ───────────────────────────────────────
 
@@ -463,12 +474,15 @@ def _cmd_execute_code(params):
 
 def _cmd_ping(_params):
     start = time.monotonic()
+    blend_file = bpy.data.filepath
     return _ok(
         {
             "blender_version": ".".join(str(v) for v in bpy.app.version),
             "addon_version": _ADDON_VERSION,
             "execute_code_enabled": _execute_code_enabled,
             "scene_name": bpy.context.scene.name,
+            "pid": os.getpid(),
+            "blend_file": os.path.abspath(blend_file) if blend_file else None,
         },
         start,
     )
@@ -949,7 +963,7 @@ def _encode_response(result):
 
 
 def _server_loop():
-    global _server_socket, _running, _ready
+    global _server_socket, _running, _ready, _startup_error
     try:
         _server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if sys.platform == "win32":
@@ -994,6 +1008,8 @@ def _server_loop():
                 break
     except Exception as e:
         print(f"[Claude Bridge] Server error: {e}")
+        if not _ready:
+            _startup_error = _startup_error_message(e)
         _ready = False
         _running = False
         if _server_socket:
@@ -1011,7 +1027,7 @@ def _server_loop():
 def start_server(port=_DEFAULT_PORT):
     """受け口を起動する。すでに動いていれば何もしない。"""
     global _running, _ready, _server_thread, _session_token, _execute_code_enabled
-    global _port, _exec_busy, _current_exec_request_id, _blocked_request_id
+    global _port, _exec_busy, _current_exec_request_id, _blocked_request_id, _startup_error
 
     if _running:
         print("[Claude Bridge] Already running")
@@ -1021,6 +1037,7 @@ def start_server(port=_DEFAULT_PORT):
         _server_thread.join(timeout=2)
 
     _port = port
+    _startup_error = None
     _execute_code_enabled = os.environ.get("CLAUDE_BRIDGE_EXECUTE", "1") != "0"
     with _pending_lock:
         _pending.clear()
@@ -1112,3 +1129,8 @@ def stop_server():
 def is_running():
     """受け口が listen と token 公開まで完了しているか。UI の表示用。"""
     return _running and _ready
+
+
+def get_startup_error():
+    """Return the most recent brief bridge startup failure for the panel."""
+    return _startup_error

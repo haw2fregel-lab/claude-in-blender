@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import threading
 import time
@@ -135,3 +136,59 @@ def test_busy_guard_timeout_recovery_and_system_exit(bridge_tcp):
     after_exit = bridge_tcp.send("execute_code", {"code": "result = 'still alive'"})
     assert after_exit["ok"] is True
     assert after_exit["data"]["result"] == "still alive"
+
+
+# --- 契約: get_bridge_status がどの Blender かを名乗る（票B2 契約4 / 完了条件 (d)） ---
+
+
+@pytest.fixture
+def fake_blend_file(monkeypatch):
+    """`bpy.data` の .blend まわりを実物と同じ型（str / bool）へ寄せる factory。
+
+    conftest の bpy は MagicMock なので、素の `filepath` は mock を返し、応答を JSON に
+    できない。保存済みか未保存かは案件ごとに違うので、呼ぶ側が渡す。
+    """
+    import bpy
+
+    def install(filepath):
+        monkeypatch.setattr(bpy.data, "filepath", filepath)
+        monkeypatch.setattr(bpy.data, "is_saved", bool(filepath))
+        # 絶対 path 化を bpy.path.abspath へ通す実装でも、本物と同じ答えになるように。
+        monkeypatch.setattr(bpy.path, "abspath", os.path.abspath)
+        # ping 応答の残りの材料も JSON にできる実物型へ寄せる。
+        monkeypatch.setattr(bpy.app, "version", (4, 2, 0))
+        monkeypatch.setattr(bpy.context.scene, "name", "Scene")
+
+    return install
+
+
+def test_get_bridge_status_names_the_process_and_the_open_blend_file(
+    bridge_tcp, fake_blend_file, tmp_path
+):
+    blend = tmp_path / "scene.blend"
+    blend.write_bytes(b"")
+    fake_blend_file(str(blend))
+
+    # MCP ツール get_bridge_status の TCP 実体は ping
+    response = bridge_tcp.send("ping", {})
+
+    assert response["ok"] is True
+    data = response["data"]
+    assert isinstance(data["pid"], int)
+    assert data["pid"] == os.getpid()
+    assert os.path.isabs(data["blend_file"])
+    assert os.path.normcase(data["blend_file"]) == os.path.normcase(str(blend))
+    # 後方互換。addon_version は .claude/skills が get_bridge_status の返りとして名指す key。
+    assert "addon_version" in data, f"既存 key が消えている: {sorted(data)}"
+
+
+def test_get_bridge_status_reports_no_blend_file_until_the_first_save(
+    bridge_tcp, fake_blend_file
+):
+    fake_blend_file("")  # 未保存の Blender は bpy.data.filepath が空
+
+    response = bridge_tcp.send("ping", {})
+
+    assert response["ok"] is True
+    assert response["data"]["blend_file"] is None
+    assert response["data"]["pid"] == os.getpid()

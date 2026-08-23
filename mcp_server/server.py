@@ -12,6 +12,7 @@ from mcp.types import ImageContent, TextContent
 from bridge import BlenderBridge
 
 _SCRATCH_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender", "scratch")
+_SCRATCH_MAX_BYTES = 1024 * 1024
 _CLAUDE_CONFIG_DIR = Path(
     os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
 )
@@ -21,10 +22,13 @@ mcp = FastMCP(
     "claude-in-blender",
     instructions=(
         "Blender 3D scene manipulation.\n\n"
-        "Combine multiple operations into one execute_code call"
-        " to save tokens. For example, creating an object,"
-        " setting its material, and adjusting lighting should"
-        " be one script, not three separate calls.\n\n"
+        "Combine related operations into one execute_code call to save tokens,"
+        " but keep enough granularity to identify the state after a partial"
+        " failure. For example, creating an object, setting its material, and"
+        " adjusting lighting can be one script when that granularity is retained.\n\n"
+        "Mutating scripts are not transactional. If a script fails, assume earlier"
+        " statements may already have changed Blender. Inspect the affected state"
+        " before retrying, then run only the unapplied or corrective steps.\n\n"
         "For anything longer than a few lines, use write_scratch"
         f" to create a .py file under {_SCRATCH_DIR}"
         " and run it with execute_file. Use edit_scratch for a"
@@ -43,9 +47,9 @@ mcp = FastMCP(
         "Write execute_code scripts as straight-line throwaway"
         " code: the goal is already decided, so no defensive"
         " if-branches, no comments, no helper abstractions."
-        " If it fails, the error comes back — just fix and"
-        " retry. (Detailed result values for verification are"
-        " still fine.)\n\n"
+        " If it fails, inspect the affected state before deciding which"
+        " unapplied or corrective code to run. (Detailed result values"
+        " for verification are still fine.)\n\n"
         "When the current state is uncertain (selection,"
         " dimensions, existing names), do not hedge with"
         " if-branches. Split the work: first send a read-only"
@@ -58,6 +62,8 @@ mcp = FastMCP(
         " A new execute remains blocked until that request reaches succeeded"
         " or failed and its final status is observed. Use scene-info tools"
         " afterward when you also need to verify the resulting Blender state."
+        " If the bridge restarted or get_request_status cannot return a status,"
+        " inspect the scene state before retrying."
     ),
 )
 bridge = BlenderBridge()
@@ -95,10 +101,14 @@ def _validate_scratch_name(name: str) -> str:
     return name
 
 
-def _scratch_file_error(path: str) -> RuntimeError:
-    return RuntimeError(
-        f"Only .py files under scratch ({_SCRATCH_DIR}) can be executed: {path}"
-    )
+def _validate_scratch_content(content: str) -> int:
+    content_size = len(content.encode("utf-8"))
+    if content_size > _SCRATCH_MAX_BYTES:
+        raise RuntimeError(
+            "Scratch content exceeds the 1 MiB limit "
+            f"({_SCRATCH_MAX_BYTES:,} bytes): {content_size:,} bytes"
+        )
+    return content_size
 
 
 def _reject_scratch_symlink(path: Path) -> None:
@@ -111,6 +121,7 @@ def _reject_scratch_symlink(path: Path) -> None:
 def _write_scratch_file(path: Path, content: str) -> None:
     temp_path = None
     try:
+        _validate_scratch_content(content)
         _reject_scratch_symlink(path)
         fd, temp_path = tempfile.mkstemp(
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -135,14 +146,28 @@ def _write_scratch_file(path: Path, content: str) -> None:
 def _resolve_scratch_file(path: str) -> Path:
     try:
         scratch_dir = Path(_SCRATCH_DIR).resolve()
-        scratch_file = Path(path).resolve(strict=True)
-        scratch_file.relative_to(scratch_dir)
-        if scratch_file.suffix != ".py" or not scratch_file.is_file():
-            raise ValueError
-        if scratch_file.stat().st_size > 1024 * 1024:
-            raise ValueError
+        scratch_file = Path(path).resolve(strict=False)
     except (OSError, TypeError, ValueError):
-        raise _scratch_file_error(path) from None
+        raise RuntimeError(f"Invalid scratch file path: {path}") from None
+    try:
+        scratch_file.relative_to(scratch_dir)
+    except ValueError:
+        raise RuntimeError(
+            f"Scratch file must be under {_SCRATCH_DIR}: {path}"
+        ) from None
+    if scratch_file.suffix != ".py":
+        raise RuntimeError(f"Scratch file must end with .py: {path}")
+    if not scratch_file.is_file():
+        raise RuntimeError(f"Scratch file does not exist: {path}")
+    try:
+        file_size = scratch_file.stat().st_size
+    except OSError as e:
+        raise RuntimeError(f"Cannot inspect scratch file: {path}: {e}") from e
+    if file_size > _SCRATCH_MAX_BYTES:
+        raise RuntimeError(
+            "Scratch file exceeds the 1 MiB limit "
+            f"({_SCRATCH_MAX_BYTES:,} bytes): {path}"
+        )
     return scratch_file
 
 
@@ -256,10 +281,11 @@ def get_scene_info() -> str:
 def write_scratch(name: str, content: str) -> str:
     """Write a Python script to the scratch directory for execute_file."""
     name = _validate_scratch_name(name)
+    content_size = _validate_scratch_content(content)
     os.makedirs(_SCRATCH_DIR, exist_ok=True)
     path = Path(_SCRATCH_DIR) / name
     _write_scratch_file(path, content)
-    return f"Wrote {path.resolve()} ({len(content.encode('utf-8'))} bytes)"
+    return f"Wrote {path.resolve()} ({content_size} bytes)"
 
 
 @mcp.tool()
@@ -323,15 +349,32 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
 
     ss_result = bridge.send("get_viewport_screenshot")
     if not ss_result.get("ok"):
-        return [text_content]
+        reason = (ss_result.get("error") or {}).get("message") or "Unknown error"
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    f"{text_content.text}\n"
+                    f"Execution succeeded, but capture_after failed: {reason}"
+                ),
+            )
+        ]
 
     data = ss_result["data"]
     path = data["screenshot_path"]
     try:
         with open(path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("ascii")
-    except OSError:
-        return [text_content]
+    except OSError as e:
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    f"{text_content.text}\n"
+                    f"Execution succeeded, but capture_after failed: {e}"
+                ),
+            )
+        ]
     finally:
         try:
             os.remove(path)
@@ -352,6 +395,7 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
 def execute_code(code: str, capture_after: bool = False) -> list:
     """Execute Python code inside Blender (bpy available).
     Set a variable called 'result' to return data back.
+    Mutating scripts are not transactional; inspect affected state before retrying.
 
     For anything longer than a few lines, use write_scratch then execute_file.
 
@@ -366,6 +410,9 @@ def execute_code(code: str, capture_after: bool = False) -> list:
 def execute_file(path: str, capture_after: bool = False) -> list:
     """Execute a Python file inside Blender (bpy available).
     Set a variable called 'result' in the file to return data back.
+    Mutating scripts are not transactional; inspect affected state before retrying.
+    Only accepts a .py file up to 1 MiB at the absolute scratch path returned by
+    write_scratch.
 
     Prefer this over execute_code for longer scripts: use write_scratch,
     run the returned path, fix it with edit_scratch, re-run — much cheaper than
@@ -373,7 +420,7 @@ def execute_file(path: str, capture_after: bool = False) -> list:
     (with file line numbers) before reaching Blender.
 
     Args:
-        path: Absolute path to a Python (.py) file
+        path: Absolute scratch path returned by write_scratch (.py, maximum 1 MiB)
         capture_after: If True, capture a viewport screenshot after execution
     """
     scratch_file = _resolve_scratch_file(path)

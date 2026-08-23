@@ -546,7 +546,7 @@ def _run_claude(full_prompt):
         _result_box = {"ready": True, "text": text, "error": err, "usage": usage}
     except subprocess.TimeoutExpired:
         _result_box = {"ready": True, "text": "Timeout (300s)", "error": True}
-    except Exception as e:  # noqa: BLE001 - 試作: 何が起きても箱に入れて UI に見せる
+    except Exception as e:  # noqa: BLE001 - ワーカー例外を UI へ返し、送信失敗を観測可能にする。
         _result_box = {"ready": True, "text": f"Execution error: {e}", "error": True}
 
 
@@ -795,6 +795,10 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             layout.label(text="Bridge: running", icon="CHECKMARK", translate=False)
         else:
             layout.label(text="Bridge: stopped", icon="X", translate=False)
+            startup_error = bridge_server.get_startup_error()
+            if startup_error:
+                layout.label(text=startup_error, icon="INFO", translate=False)
+                layout.label(text="See console for details.", translate=False)
         layout.prop(wm, "claude_bridge_prompt", text="")
         col = layout.column(align=True)
         col.label(text="Context:", translate=False)

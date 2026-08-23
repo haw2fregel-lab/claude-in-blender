@@ -1,8 +1,11 @@
 import os
 import re
+import socket
 import threading
+import time
 
 import bpy
+import pytest
 
 from claude_bridge import bridge_server
 
@@ -247,3 +250,74 @@ def test_running_status_requires_listener_readiness(monkeypatch):
 
     monkeypatch.setattr(bridge_server, "_ready", True)
     assert bridge_server.is_running() is True
+
+
+# --- 契約: 起動が失敗した理由を外から読める（票B2 契約5 / 完了条件 (e)） ---
+# 起動に失敗した理由を module が保ち、panel が読める公開関数で取れること。
+# 名前は実装側の決めどころ。別名になったら、この 2 行を直せば残りは通る。
+STARTUP_ERROR_GETTER = "get_startup_error"
+STARTUP_ERROR_ATTR = "_startup_error"
+
+
+def _startup_error():
+    getter = getattr(bridge_server, STARTUP_ERROR_GETTER, None)
+    assert callable(getter), (
+        f"起動失敗の理由を返す公開関数が無い: bridge_server.{STARTUP_ERROR_GETTER}"
+    )
+    return getter()
+
+
+@pytest.fixture
+def startup_error_stays_here(monkeypatch):
+    """記録された理由を、この test の外へ持ち出さない。
+
+    monkeypatch は今の値を控えて teardown で戻すので、名前が合っていればテスト中に
+    付いた理由は片付く（別名なら掃除が空振りするだけで、契約の検証は変わらない）。
+    """
+    if hasattr(bridge_server, STARTUP_ERROR_ATTR):
+        monkeypatch.setattr(
+            bridge_server, STARTUP_ERROR_ATTR, getattr(bridge_server, STARTUP_ERROR_ATTR)
+        )
+
+
+def test_a_busy_port_leaves_a_readable_startup_reason(
+    tmp_path, monkeypatch, startup_error_stays_here
+):
+    token_file = tmp_path / "bridge-temp" / "blender-session-token"
+    monkeypatch.setattr(bridge_server, "_TMP_DIR", str(token_file.parent))
+    monkeypatch.setattr(bridge_server, "_TOKEN_FILE", str(token_file))
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        # Windows は SO_REUSEADDR を付けた bind に port を横取りさせる。
+        # 「使用中」を確実に作るため、排他で押さえてから渡す。
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        busy_port = blocker.getsockname()[1]
+
+        try:
+            bridge_server.start_server(port=busy_port)
+        except OSError:
+            # bind の例外をそのまま投げる実装でも、理由が取れることが契約。
+            pass
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and _startup_error() is None:
+                time.sleep(0.01)
+
+            reason = _startup_error()
+            assert isinstance(reason, str) and reason.strip(), (
+                f"port {busy_port} を塞いだまま起動したのに理由が取れない: {reason!r}"
+            )
+            assert bridge_server.is_running() is False
+        finally:
+            bridge_server.stop_server()
+
+
+def test_a_healthy_bridge_reports_no_startup_reason(bridge_tcp):
+    # 起動が通っている間は None。前の失敗が残り続けると、パネルは動いている橋に
+    # 停止理由を出してしまう。
+    assert _startup_error() is None
+
+
