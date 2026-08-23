@@ -32,7 +32,8 @@ _EXPECTED_SESSION_UNSET = object()
 # description に指示文そのものを入れてあるので、ホバーで何が送られるか見える。
 _CTX_TOGGLES = (
     ("claude_bridge_ctx_selection", "Selection",
-     "Target the current selection (get_selection)."),
+     "Target the selection as it is when Claude checks it (get_selection) — "
+     "the live state, not a snapshot taken at Send."),
     ("claude_bridge_ctx_scene", "Scene info",
      "Check the scene first (get_scene_info / get_object_info)."),
     ("claude_bridge_ctx_doc", "Docs",
@@ -559,6 +560,7 @@ def _poll_result():
         wm.claude_bridge_reply = _result_box.get("text", "")
         wm.claude_bridge_usage = _result_box.get("usage", "")
         _result_box = {"ready": False, "text": "", "error": False}
+        bridge_server.clear_request_context()
         _tag_redraw()
         return None  # timer 終了
     if _worker and _worker.is_alive() and wm.claude_bridge_status != "WORKING":
@@ -635,6 +637,11 @@ class CLAUDE_OT_send(bpy.types.Operator):
         wm.claude_bridge_reply = ""
         # この送信が見た世代を覚える。次の確認は、この後に切り替わった時だけ出る
         _last_sent_generation = bridge_server.current_generation()
+        # bridge 側も同じ値を基準にする。照合不能でも送信自体は止めない。
+        try:
+            bridge_server.set_request_context(_last_sent_generation)
+        except Exception:  # noqa: BLE001 - 検知の失敗で送信や実行を止めない
+            pass
         _worker = threading.Thread(target=_run_claude, args=(full_prompt,), daemon=True)
         _worker.start()
         # persistent=True: 応答待ち中にファイルを開いても poll を生かす

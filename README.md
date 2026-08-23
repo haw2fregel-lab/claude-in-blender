@@ -13,7 +13,7 @@ Everything you need to add lives in this repository: a Blender add-on + a bundle
 ## What it does
 
 - Send requests in plain language from the "Claude" tab in Blender's N-panel
-- Context toggles — "target my selection", "check the scene info first", "look up the docs first", and "check a screenshot first" — each available as a single checkbox per request
+- Context toggles — "target my selection", "check the scene info first", "look up the docs first", and "check a screenshot first" — each available as a single checkbox per request. Toggles point at the live state: "my selection" means whatever is selected at the moment Claude checks, not a snapshot taken when you press Send
 - The panel uses a **fork** of your existing Claude Code session — your conversation context and CLAUDE.md carry over, while the original session is never written to. The panel uses its own model selection and restricted tool/MCP configuration.
 - If the `.blend` changes, the panel warns before the next request and the tool response reports the switch as `file_switched`. In-flight operations are not blocked.
 - **`claude_bridge_log`** in Blender's Text Editor keeps submitted code, 200-character result excerpts, and error messages — and when an error is too large for the response (over 2 KB), its full message and traceback go to the log. It does not capture stdout or stderr; after 5,000 lines, it trims the older side and retains about 2,500 recent lines.

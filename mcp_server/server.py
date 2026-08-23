@@ -72,13 +72,19 @@ mcp = FastMCP(
 bridge = BlenderBridge()
 
 
+def _file_switch_notice(result: dict) -> str:
+    """切替の印がある bridge 応答だけへ、既定の注意書きを前置きする。"""
+    return f"{_FILE_SWITCH_NOTICE}\n\n" if result.get("file_switched") else ""
+
+
 def _fmt(result: dict) -> str:
     """Format bridge result for AI — strip envelope, compact JSON."""
-    return json.dumps(result["data"], ensure_ascii=False)
+    return _file_switch_notice(result) + json.dumps(result["data"], ensure_ascii=False)
 
 
 def _bridge_error(result: dict, prefix: str = "") -> RuntimeError:
     # prefix は封筒の外から来る注意書き（ファイル切替）。失敗の文面より前に置く。
+    prefix = prefix or _file_switch_notice(result)
     error = result.get("error") or {}
     msg = error.get("message", "Unknown error")
     tb = error.get("traceback")
@@ -285,7 +291,10 @@ def get_viewport_screenshot() -> list:
     return [
         TextContent(
             type="text",
-            text=f"Viewport screenshot ({data['width']}x{data['height']})",
+            text=(
+                _file_switch_notice(result)
+                + f"Viewport screenshot ({data['width']}x{data['height']})"
+            ),
         ),
         ImageContent(
             type="image",
@@ -350,7 +359,7 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
         )
     result = bridge.send("execute_code", {"code": code, "filename": filename})
     # 切替が挟まった時だけ bridge が印を立てる（通常はキー自体が来ない）
-    notice = f"{_FILE_SWITCH_NOTICE}\n\n" if result.get("file_switched") else ""
+    notice = _file_switch_notice(result)
     if not result.get("ok"):
         raise _bridge_error(result, prefix=notice)
 
@@ -375,6 +384,9 @@ def _run_code(code: str, capture_after: bool, filename: str = "<execute_code>") 
         return [text_content]
 
     ss_result = bridge.send("get_viewport_screenshot")
+    screenshot_notice = _file_switch_notice(ss_result)
+    if screenshot_notice and not notice:
+        text_content = TextContent(type="text", text=screenshot_notice + text_content.text)
     if not ss_result.get("ok"):
         reason = (ss_result.get("error") or {}).get("message") or "Unknown error"
         return [

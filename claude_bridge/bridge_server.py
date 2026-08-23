@@ -6,7 +6,8 @@
 ソケットは別スレッドが持ち、bpy を触るのはタイマー経由のメインスレッドだけ。
 
 公開 API: start_server() / stop_server() / is_running() / get_startup_error()
-        / clear_exec_log() / current_generation()
+        / clear_exec_log() / current_generation() / set_request_context()
+        / clear_request_context()
 """
 
 import errno
@@ -339,6 +340,8 @@ class _ExecTimeoutTracer:
 _GENERATION_PROP = "claude_bridge_generation"  # 登録は panel.register() 側
 _file_generation = 0  # 0 = 未初期化。stop_server() で戻す
 _last_exec_generation = None  # execute_code が前回見た世代（None = まだ見ていない）
+# パネルから送った依頼が始まった時の世代。None は desktop 直用の従来経路。
+_request_context_generation = None
 
 
 def current_generation():
@@ -369,6 +372,34 @@ def current_generation():
     return marked
 
 
+def set_request_context(generation: int):
+    """進行中のパネル依頼が始まった時のファイル世代を覚える。"""
+    global _request_context_generation
+    _request_context_generation = generation
+
+
+def clear_request_context():
+    """進行中のパネル依頼に紐づくファイル世代を捨てる。"""
+    global _request_context_generation
+    _request_context_generation = None
+
+
+def _current_generation_for_switch():
+    """切替検知に使える世代を返す。検知できなければ None で実行を通す。"""
+    try:
+        return current_generation()
+    except Exception:  # noqa: BLE001 - 検知の失敗で送信や実行を止めない
+        return None
+
+
+def _request_context_file_switched():
+    """パネル依頼の開始時から .blend が切り替わっていたかを返す。"""
+    if _request_context_generation is None:
+        return False
+    generation = _current_generation_for_switch()
+    return generation is not None and generation != _request_context_generation
+
+
 def _observe_exec_generation():
     """前回の execute_code から .blend が切り替わっていたかを返し、見た世代を覚え直す。
 
@@ -376,9 +407,13 @@ def _observe_exec_generation():
     「古いファイルのまま続いている」の終わりを判定できないため。
     """
     global _last_exec_generation
-    generation = current_generation()
+    generation = _current_generation_for_switch()
+    if generation is None:
+        return False
     switched = _last_exec_generation is not None and generation != _last_exec_generation
     _last_exec_generation = generation
+    if _request_context_generation is not None:
+        return generation != _request_context_generation
     return switched
 
 
@@ -394,6 +429,7 @@ def _with_file_switch(envelope, switched):
 
 def _cmd_get_scene_info(_params):
     start = time.monotonic()
+    file_switched = _request_context_file_switched()
     scene = bpy.context.scene
     total_objects = len(scene.objects)
     objects = []
@@ -420,21 +456,31 @@ def _cmd_get_scene_info(_params):
     }
     if total_objects > _MAX_SCENE_INFO_OBJECTS:
         data["objects_truncated"] = True
-    return _ok(data, start)
+    return _with_file_switch(_ok(data, start), file_switched)
 
 
 def _cmd_execute_code(params):
     start = time.monotonic()
+    # request context 中は、入力エラーの封筒にも依頼開始時からの切替を載せる。
+    # context がない desktop 直用では、従来どおり実行直前にだけ世代を観測する。
+    file_switched = (
+        _observe_exec_generation()
+        if _request_context_generation is not None
+        else None
+    )
     if not _execute_code_enabled:
-        return _err(
-            "execute_code is disabled (CLAUDE_BRIDGE_EXECUTE=0).",
-            start=start,
+        return _with_file_switch(
+            _err(
+                "execute_code is disabled (CLAUDE_BRIDGE_EXECUTE=0).",
+                start=start,
+            ),
+            file_switched,
         )
 
     code = params.get("code") or ""
     filename = params.get("filename") or "<execute_code>"
     if not code.strip():
-        return _err("Empty code", start=start)
+        return _with_file_switch(_err("Empty code", start=start), file_switched)
 
     request_id = params.get("request_id")
     request_label = request_id[:8] if isinstance(request_id, str) else "unknown"
@@ -445,7 +491,8 @@ def _cmd_execute_code(params):
 
     # ファイル切替は弾かない。実行はそのまま通し、応答に印だけ載せて判断を Claude に残す。
     # 成否どちらの封筒にも載せる——切替の直後は「名前が無い」等の失敗こそ手がかりになる。
-    file_switched = _observe_exec_generation()
+    if file_switched is None:
+        file_switched = _observe_exec_generation()
 
     namespace = {"bpy": bpy, "__builtins__": __builtins__, "__name__": "__main__"}
     if not filename.startswith("<"):
@@ -498,6 +545,7 @@ def _cmd_ping(_params):
 
 def _cmd_get_viewport_screenshot(_params):
     start = time.monotonic()
+    file_switched = _request_context_file_switched()
     target_area = None
     target_window = None
     for window in bpy.context.window_manager.windows:
@@ -510,7 +558,9 @@ def _cmd_get_viewport_screenshot(_params):
             break
 
     if not target_area:
-        return _err("No 3D Viewport found", start=start)
+        return _with_file_switch(
+            _err("No 3D Viewport found", start=start), file_switched
+        )
 
     tmp_path = os.path.join(_TMP_DIR, f"viewport-{uuid.uuid4().hex[:8]}.png")
     os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
@@ -540,18 +590,22 @@ def _cmd_get_viewport_screenshot(_params):
         finally:
             bpy.data.images.remove(img)
 
-    return _ok(
-        {
-            "screenshot_path": tmp_path,
-            "width": width,
-            "height": height,
-        },
-        start,
+    return _with_file_switch(
+        _ok(
+            {
+                "screenshot_path": tmp_path,
+                "width": width,
+                "height": height,
+            },
+            start,
+        ),
+        file_switched,
     )
 
 
 def _cmd_get_selection(_params):
     start = time.monotonic()
+    file_switched = _request_context_file_switched()
     obj = bpy.context.active_object
     selected = bpy.context.selected_objects
     total_selected = len(selected)
@@ -570,9 +624,12 @@ def _cmd_get_selection(_params):
         }
         if total_selected > _MAX_SELECTED_OBJECTS:
             data["selection_truncated"] = True
-        return _ok(
-            data,
-            start,
+        return _with_file_switch(
+            _ok(
+                data,
+                start,
+            ),
+            file_switched,
         )
 
     result = {
@@ -595,15 +652,16 @@ def _cmd_get_selection(_params):
         result["total_edges"] = len(bm.edges)
         result["total_faces"] = len(bm.faces)
 
-    return _ok(result, start)
+    return _with_file_switch(_ok(result, start), file_switched)
 
 
 def _cmd_get_object_info(params):
     start = time.monotonic()
+    file_switched = _request_context_file_switched()
     name = params.get("name")
     obj = bpy.data.objects.get(name) if name else bpy.context.active_object
     if not obj:
-        return _err("No object found", start=start)
+        return _with_file_switch(_err("No object found", start=start), file_switched)
 
     info = {
         "name": obj.name,
@@ -632,7 +690,7 @@ def _cmd_get_object_info(params):
         info["has_custom_normals"] = mesh.has_custom_normals
         info["materials"] = [m.name if m else None for m in mesh.materials]
 
-    return _ok(info, start)
+    return _with_file_switch(_ok(info, start), file_switched)
 
 
 def _cap_doc_text(data):
@@ -944,9 +1002,12 @@ def _client_handler(conn, addr):
                 try:
                     resp_bytes = _encode_response(holder["result"])
                 except (TypeError, ValueError):
-                    resp_bytes = _encode_response(
-                        _err("Response not serializable", start=time.monotonic())
-                    )
+                    fallback = _err("Response not serializable", start=time.monotonic())
+                    # 作り直した封筒でも切替の印は落とさない——切替直後の失敗こそ手がかり
+                    if (isinstance(holder["result"], dict)
+                            and holder["result"].get("file_switched")):
+                        fallback["file_switched"] = True
+                    resp_bytes = _encode_response(fallback)
 
                 if len(resp_bytes) > _MAX_RESPONSE_BYTES:
                     result = holder["result"]
@@ -1156,6 +1217,7 @@ def stop_server():
     # 一緒に捨てる（古い採番と比べると、再起動の1回目を切替と誤って言う）。
     _file_generation = 0
     _last_exec_generation = None
+    clear_request_context()
 
     if _server_socket:
         try:
