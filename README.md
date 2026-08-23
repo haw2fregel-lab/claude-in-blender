@@ -46,7 +46,7 @@ Want the panel to carry the context of another conversation? Say **connect Blend
 
 **Work dir**, at the top of the panel, is where your requests run. Say *connect Blender* inside your own project and the panel moves there, with that repository's `CLAUDE.md` and skills in effect — it does not have to be this repository. Directories you have used stay in the dropdown (latest five). Switching drops the current conversation, so the picker is disabled while connected — disconnect first.
 
-Modeling know-how ships as a Skill ([`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)). Requests sent from the panel read it once per session — where names and enums moved in Blender 5.x, how data names behave under a translated UI, how to verify Geometry Nodes. **Feel free to copy it into your own repositories for Blender work elsewhere.**
+Modeling know-how ships as a Skill ([`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)) — where names and enums moved in Blender 5.x, how data names behave under a translated UI, how to verify Geometry Nodes. It is available to panel requests too, but whether Claude actually reads it is Claude's own call based on what you asked (no instruction forcing the load is added to your message). **Feel free to copy it into your own repositories for Blender work elsewhere.**
 
 ## License
 

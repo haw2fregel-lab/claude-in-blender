@@ -8,11 +8,15 @@
 - `push_recent`: 作業ディレクトリの履歴の積み方（C-1 / E-2）
 - 送信の入口: 止めると決めた四条件（C-5）と、`.mcp.json` の無い作業リポでの送信（C-1）
 - パネルの描画: 作業ディレクトリ選択が無効になる条件（C-4）
+- 起動の argv: Skill Tool の入口と、許可するスキルの範囲
+- 打ち切り（timeout）: 届いていた session_id と本文を捨てない
 
 登録の cwd は「Claude を起動する作業ディレクトリ」、repo は「アドオンのソースリポ」。
 この二つが別物になったのがこの案件で、テストもその二つを別のディレクトリで組む。
 """
 import json
+import re
+import subprocess
 from pathlib import Path
 
 import bpy
@@ -597,4 +601,405 @@ def test_the_work_directory_picker_is_disabled_while_connected_or_sending(
     assert _row_enabled(layout, _PICK_CWD_IDNAME) is expected_enabled, (
         "C-4: 接続中（session_id か fork_from がある）と送信処理中（WORKING）は"
         "作業ディレクトリを選べない。どちらでもない時は選べる"
+    )
+
+
+# --- 起動の argv: Skill の入口と、許可するスキルの範囲 ---
+# `--tools` の値が空文字だと組み込み Tool が全部落ちる（公式ヘルプ: "" で all tools を
+# disable）。Skill は組み込みの `Skill` Tool から実行されるので、値が空のままだと
+# リポに SKILL.md を置いても本文へ辿り着く経路が無い。
+# `--allowedTools` は「許可する旗」であって「使える Tool を増やす旗」ではないので、
+# そこへ書いても `--tools` で落とされた Tool は戻らない——だから両方を見る。
+#
+# 固定するのは入口が開いていることだけ。読むかどうかはモデルの判断で、確実に読ませる
+# 指示は依頼文へ足さない（見えない追記をしない、の既存方針）。
+# 並び順と渡し方は実装の自由。載っているかどうかだけを見る。
+
+_MODELING_SKILL = "Skill(blender-modeling)"
+_BLENDER_TOOLS = "mcp__claude-in-blender__*"
+# 開発者向けスキル。パネルの利用者が、意図せず開発フロー（アドオンの焼き直し等）へ
+# 入らないよう、パネルからの起動では許可しない。
+_DEVELOPER_SKILLS = ("blender-setup", "blender-update", "blender-bridge")
+
+
+def _flag_value(argv, flag):
+    """`--flag value` / `--flag=value` のどちらでも値を取る。"""
+    for index, argument in enumerate(argv):
+        if argument == flag:
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+            assert not value.startswith("-"), f"{flag} に値が付いていない: {argv}"
+            return value
+        if argument.startswith(flag + "="):
+            return argument.split("=", 1)[1]
+    raise AssertionError(f"{flag} が渡っていない: {argv}")
+
+
+def _allowed_tools(argv):
+    """`--allowedTools` へ渡った値を、ひと続きのテキストにして返す。
+
+    渡し方（1つの文字列 / 複数の値 / 旗の繰り返し / `=` 連結）は実装の自由なので、
+    どの形も同じテキストとして読む。
+    """
+    flag = "--allowedTools"
+    collected = []
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == flag:
+            index += 1
+            while index < len(argv) and not argv[index].startswith("-"):
+                collected.append(argv[index])
+                index += 1
+            continue
+        if argument.startswith(flag + "="):
+            collected.append(argument.split("=", 1)[1])
+        index += 1
+    assert collected, f"{flag} が渡っていない: {argv}"
+    return "\n".join(collected)
+
+
+def _names_the_tool(text, name):
+    """Tool 名が単体の語として並びに出るか。区切り（カンマ / 空白）は問わない。"""
+    return re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text) is not None
+
+
+def _allows_every_skill(text):
+    """スキル名を伴わない `Skill` の許可。これがあると、どのスキルも通る。"""
+    return re.search(r"(?<![\w-])Skill(?!\s*\()(?![\w-])", text) is not None
+
+
+@pytest.fixture
+def sent_argv(
+    bridge_tcp,
+    bridge_session_file,
+    panel_window_manager,
+    fake_claude,
+    blender_timers,
+    tmp_path,
+):
+    """一度だけ送信して、claude が受け取った argv を返す。
+
+    身代わりの claude は起動のたびに argv を1件積む（conftest）。ここで見るのは
+    その1件だけで、送信そのものの筋（cwd / mcp config）は上のテストが見ている。
+    """
+    _register(
+        bridge_session_file,
+        cwd=_create_work_dir(tmp_path),
+        repo=_create_addon_repo(tmp_path),
+    )
+    claude = fake_claude(stdout=_result_stdout())
+    window_manager = panel_window_manager(claude_bridge_prompt=_PROMPT)
+
+    operator = _press_send(blender_timers)
+
+    calls = claude.calls()
+    assert len(calls) == 1, (
+        f"送信が claude まで届かなかった: {_user_visible(operator, window_manager)!r}"
+    )
+    return calls[0]["argv"]
+
+
+def test_the_panel_leaves_the_skill_tool_switched_on(sent_argv):
+    """契約: `--tools` が組み込みの Skill Tool を名指す。"""
+    tools = _flag_value(sent_argv, "--tools")
+
+    assert tools != "", (
+        "空文字は組み込み Tool を全部落とす。Skill Tool ごと消えると、"
+        "SKILL.md を置いても本文へ辿り着く経路が無くなる"
+    )
+    assert _names_the_tool(tools, "Skill"), (
+        f"契約: モデリングの作法を読む入口として Skill Tool を残す: {tools!r}"
+    )
+
+
+def test_the_panel_allows_the_modeling_skill_and_the_blender_tools(sent_argv):
+    """契約: 残した Skill Tool を、モデリングのスキルへ通す。MCP tool は従来どおり。"""
+    allowed = _allowed_tools(sent_argv)
+
+    assert _MODELING_SKILL in allowed, (
+        f"契約: モデリングの作法を書いたスキルを許可する: {allowed!r}"
+    )
+    assert _BLENDER_TOOLS in allowed, (
+        f"従来どおり、Blender を触る MCP tool を許可する: {allowed!r}"
+    )
+
+
+def test_the_panel_keeps_the_developer_skills_out_of_the_allowed_tools(sent_argv):
+    """契約: パネルの利用者が、意図せず開発フローへ入らないこと。
+
+    許可を名指しの1件に留めるのも同じ理由——スキル名を伴わない `Skill` の許可は、
+    リポにある開発者向けスキルまで一緒に通してしまう。
+    """
+    allowed = _allowed_tools(sent_argv)
+
+    for skill in _DEVELOPER_SKILLS:
+        assert skill not in allowed, (
+            f"契約: 開発者向けスキル {skill} はパネルからは許可しない: {allowed!r}"
+        )
+    assert not _allows_every_skill(allowed), (
+        f"許可はスキルを名指しで（{_MODELING_SKILL}）。裸の Skill は全部を通す: {allowed!r}"
+    )
+
+
+def test_the_panel_keeps_the_mcp_config_strict(sent_argv):
+    """変えないこと: リポの `.mcp.json` を混ぜず、パネルが渡した config だけで立てる。"""
+    assert "--strict-mcp-config" in sent_argv, sent_argv
+
+
+# --- 打ち切り（timeout）: 届いていたものを捨てない ---
+# 実測で起きたこと: モデリング依頼が `_CLAUDE_TIMEOUT_SEC` を超え、Blender 側の作業は
+# 適用済みなのに、応答も session_id も消えて `No session connected` へ戻った。
+# 育った会話が捨てられる。
+#
+# 拾える根拠が二つある。
+#   - `session_id` は `result` だけでなく全イベント（1行目の `system`）に載る（実測）
+#   - `subprocess.run(timeout=...)` は打ち切りの時、そこまでに読めた出力を
+#     `TimeoutExpired.output` へ入れて上げる
+# だから打ち切りでも、会話の続き先と届いていた本文は分かる。
+#
+# 秒数の正本は `_CLAUDE_TIMEOUT_SEC`。テストは数値そのものを固定せず、
+# 表示がその正本から来ていることだけを見る（差し替えた値が表示に出るか）。
+
+_NEW_SESSION = "22222222-2222-2222-2222-222222222222"
+_ARRIVED_TEXT = "屋根まで組みました"
+# 既定（300）と紛れない値。表示に出た数字が、差し替えたこの値だと分かるように。
+_TEST_TIMEOUT_SEC = 123
+
+
+def _event(**fields):
+    return json.dumps(fields, ensure_ascii=False)
+
+
+def _system_line(session_id):
+    """stream-json の1行目。session_id はここから既に載っている。"""
+    return _event(type="system", subtype="init", session_id=session_id)
+
+
+def _assistant_line(text, session_id, cache_read=0, input_tokens=0, cache_creation=0):
+    """assistant イベント1件。
+
+    本文と usage の在り処は公式の stream-json（Anthropic の message 形）に合わせる——
+    本文は `message.content` の text ブロック、usage は `message.usage`。
+    usage の読み方は既存の表示と同じ（再利用 = cache_read、新規 = 通常入力 + 作成）。
+    """
+    return _event(
+        type="assistant",
+        session_id=session_id,
+        message={
+            "content": [{"type": "text", "text": text}],
+            "usage": {
+                "cache_read_input_tokens": cache_read,
+                "input_tokens": input_tokens,
+                "cache_creation_input_tokens": cache_creation,
+            },
+        },
+    )
+
+
+def _truncated_stream(session_id=_NEW_SESSION, text=_ARRIVED_TEXT):
+    """打ち切られた stream-json。最後の行は書きかけのまま切れている。"""
+    return (
+        _system_line(session_id) + "\n"
+        + _assistant_line("下ごしらえします", session_id, 4, 1, 1) + "\n"
+        + _assistant_line(text, session_id, 10, 2, 5) + "\n"
+        + '{"type":"assistant","mess'  # 改行が来る前に切れた行
+    )
+
+
+# --- 打ち切りの単体: 届いた分から何が読めるか ---
+
+
+def test_partial_from_stream_reads_the_session_the_text_and_the_last_usage():
+    session_id, text, usage = panel._partial_from_stream(_truncated_stream())
+
+    assert session_id == _NEW_SESSION, (
+        "契約: session_id は result を待たずに拾える（1行目の system に載っている）"
+    )
+    assert "下ごしらえします" in text and _ARRIVED_TEXT in text, (
+        f"契約: 届いていた本文は全部拾う: {text!r}"
+    )
+    # 最終コール単体の数字（既存の表示と同じ見方）。最初のコールなら 4 / 2 になる。
+    assert panel._format_usage(usage) == "Cache reused 10 / new 7", (
+        f"契約: usage は最終コールのもの: {usage!r}"
+    )
+
+
+def test_partial_from_stream_reports_the_session_before_any_assistant_text():
+    """system だけ届いた段階でも、会話の続き先は分かる。"""
+    session_id, text, usage = panel._partial_from_stream(_system_line(_NEW_SESSION) + "\n")
+
+    assert session_id == _NEW_SESSION
+    assert text == ""
+    assert usage == {}
+
+
+def test_partial_from_stream_takes_only_a_uuid_as_the_session_id():
+    """自由形式の ID は掴まない（外から来た ID の扱いは既存の fork 契約と同じ見方）。"""
+    outside_id = "environment-session-12345678"
+    stream = (
+        _system_line(outside_id) + "\n" + _assistant_line(_ARRIVED_TEXT, outside_id) + "\n"
+    )
+
+    session_id, text, _usage = panel._partial_from_stream(stream)
+
+    assert session_id is None
+    assert _ARRIVED_TEXT in text, "ID を採らないだけで、届いた本文は捨てない"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [None, "", "\n", "not json at all\n", '{"type":"assistant","mess'],
+    ids=["none", "empty", "blank-line", "garbage", "cut-mid-line"],
+)
+def test_partial_from_stream_returns_nothing_when_no_event_arrived_whole(stdout):
+    assert panel._partial_from_stream(stdout) == (None, "", {})
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(_NEW_SESSION, True, id="uuid"),
+        pytest.param("3f2504e0-4f89-11d3-9a0c-0305e82c3301", True, id="mixed-hex-uuid"),
+        pytest.param(None, False, id="null"),
+        pytest.param("", False, id="empty"),
+        pytest.param("not-a-uuid", False, id="free-form"),
+        pytest.param(
+            "environment-session-12345678", False, id="externally-registered-id"
+        ),
+    ],
+)
+def test_is_session_id_accepts_only_the_uuid_shape(value, expected):
+    assert panel._is_session_id(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        pytest.param({}, "", id="nothing-to-show"),
+        # 再利用 = cache_read、新規 = 通常入力 + キャッシュ作成（2 + 5）。
+        pytest.param(
+            {
+                "cache_read_input_tokens": 10,
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 5,
+            },
+            "Cache reused 10 / new 7",
+            id="reused-and-new",
+        ),
+    ],
+)
+def test_format_usage_shows_the_reused_and_the_new_input(usage, expected):
+    assert panel._format_usage(usage) == expected
+
+
+# --- 打ち切りの外形: 送信経路を打ち切って、登録と表示を見る ---
+# 身代わりの claude（conftest）は起動されるとすぐ終わるので、実プロセスでは打ち切りを
+# 起こせない。打ち切りが生まれる場所は `subprocess.run` なので、そこを既存の送信系と
+# 同じ形（tests/test_panel_state.py の run 差し替え）で例外に替える。
+
+
+def _stub_timeout(monkeypatch, stdout, seconds=_TEST_TIMEOUT_SEC):
+    """claude の起動を打ち切りへ差し替える。渡された cmd 列を順に記録して返す。"""
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        cmd = list(args[0] if args else kwargs.get("args", []))
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, seconds, output=stdout)
+
+    monkeypatch.setattr(panel, "_CLAUDE_TIMEOUT_SEC", seconds)
+    monkeypatch.setattr(panel, "_find_claude", lambda _bridge: "claude")
+    monkeypatch.setattr(panel.subprocess, "run", fake_run)
+    return calls
+
+
+def _register_for_send(bridge_session_file, tmp_path, **fields):
+    return _register(
+        bridge_session_file,
+        cwd=_create_work_dir(tmp_path),
+        repo=_create_addon_repo(tmp_path),
+        **fields,
+    )
+
+
+def test_a_timed_out_send_keeps_the_session_and_the_text_that_arrived(
+    bridge_tcp,
+    bridge_session_file,
+    panel_window_manager,
+    blender_timers,
+    monkeypatch,
+    tmp_path,
+):
+    _register_for_send(bridge_session_file, tmp_path, session_id=None)
+    _stub_timeout(monkeypatch, _truncated_stream())
+    window_manager = panel_window_manager(claude_bridge_prompt=_PROMPT)
+
+    _press_send(blender_timers)
+
+    assert bridge_session_file.read()["session_id"] == _NEW_SESSION, (
+        "契約1: 打ち切られても、届いていた session_id を保存して会話を繋ぎ直せるようにする"
+    )
+    reply = window_manager.claude_bridge_reply
+    assert _ARRIVED_TEXT in reply, f"契約3: 届いていた本文はパネルに出す: {reply!r}"
+    assert str(_TEST_TIMEOUT_SEC) in reply, (
+        f"契約3: 打ち切りだと分かる表示は残す。秒数は _CLAUDE_TIMEOUT_SEC が正本: {reply!r}"
+    )
+    assert window_manager.claude_bridge_status == "ERROR", (
+        "契約4: 途中で切れた仕事なので、エラー扱いのまま"
+    )
+    assert window_manager.claude_bridge_usage == "Cache reused 10 / new 7", (
+        "契約5: 届いていた usage はコスト表示へ反映する"
+    )
+
+
+def test_the_next_send_after_a_timeout_resumes_the_recovered_session(
+    bridge_tcp,
+    bridge_session_file,
+    panel_window_manager,
+    blender_timers,
+    monkeypatch,
+    tmp_path,
+):
+    """契約1 の狙い: 拾った ID で、次の送信がその会話の続きになる。"""
+    _register_for_send(bridge_session_file, tmp_path, session_id=None)
+    calls = _stub_timeout(monkeypatch, _truncated_stream())
+    window_manager = panel_window_manager(claude_bridge_prompt=_PROMPT)
+
+    _press_send(blender_timers)
+    window_manager.claude_bridge_prompt = "続きをお願い"
+    _press_send(blender_timers)
+
+    assert len(calls) == 2, f"2回目の送信が claude まで届かなかった: {calls}"
+    resumed = calls[-1]
+    assert "-r" in resumed and resumed[resumed.index("-r") + 1] == _NEW_SESSION, (
+        f"契約1: 打ち切りで拾った会話の続きとして送る: {resumed}"
+    )
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [None, "", _system_line(_STORED_SESSION) + "\n"],
+    ids=["no-output", "nothing-arrived", "same-session"],
+)
+def test_a_timed_out_send_leaves_the_registration_alone_when_there_is_nothing_new(
+    bridge_tcp,
+    bridge_session_file,
+    panel_window_manager,
+    blender_timers,
+    monkeypatch,
+    tmp_path,
+    stdout,
+):
+    path = _register_for_send(bridge_session_file, tmp_path, session_id=_STORED_SESSION)
+    original = path.read_text(encoding="utf-8")
+    _stub_timeout(monkeypatch, stdout)
+    panel_window_manager(claude_bridge_prompt=_PROMPT)
+
+    _press_send(blender_timers)
+
+    assert bridge_session_file.read()["session_id"] == _STORED_SESSION, (
+        "契約2: 育っていた会話の ID を、打ち切りで消したり書き換えたりしない"
+    )
+    assert path.read_text(encoding="utf-8") == original, (
+        "契約2: 拾えた ID が既存と同じ、または一行も届いていない時は保存しに行かない"
     )

@@ -247,6 +247,9 @@ def _save_cwd(cwd):
 
 # --model に渡すのは世代で腐らないエイリアスだけ。フル名を使いたい時は
 # bridge ファイルの "model" を直接編集すれば、表示も送信もそのまま通る。
+# 送信一回の上限。超えても届いた分は拾う（session を保存して続きから送れる）。
+_CLAUDE_TIMEOUT_SEC = 300
+
 _MODEL_ITEMS = (
     # "Default" 単体は Blender 本体の翻訳辞書に載っていて「デフォルト」に化ける
     # （enum item は translate=False が届かない）。辞書に無い語を使う。
@@ -482,6 +485,63 @@ def _parse_stream_json(stdout):
     return result_event, last_usage
 
 
+def _is_session_id(value):
+    """Claude Code のセッション ID（UUID）の形をしているか。"""
+    return bool(
+        isinstance(value, str)
+        and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            value.lower(),
+        )
+    )
+
+
+def _format_usage(last_usage):
+    """パネルへ出すコスト表示。キャッシュ再利用=ほぼ無料で読めた分 /
+    新規=今回課金枠を食った分（通常入力とキャッシュ作成入力の両方）。"""
+    if not last_usage:
+        return ""
+    return "Cache reused {:,} / new {:,}".format(
+        last_usage.get("cache_read_input_tokens") or 0,
+        ((last_usage.get("input_tokens") or 0)
+         + (last_usage.get("cache_creation_input_tokens") or 0)))
+
+
+def _partial_from_stream(stdout):
+    """打ち切られた stream-json から (session_id, 届いた本文, 最終コールの usage) を返す。
+
+    session_id は result だけでなく全イベントに載る。1 行でも届いていれば拾えるので、
+    打ち切りでも会話を繋ぎ直せる——これが無いと、育った線が毎回捨てられる。
+    """
+    session_id = None
+    chunks = []
+    last_usage = {}
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        candidate = event.get("session_id")
+        if _is_session_id(candidate):
+            session_id = candidate
+        if event.get("type") != "assistant":
+            continue
+        message = event.get("message") or {}
+        usage = message.get("usage")
+        if usage:
+            last_usage = usage
+        content = message.get("content")
+        for item in content if isinstance(content, list) else ():
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                chunks.append(item["text"])
+    return session_id, "\n".join(chunks), last_usage
+
+
 def _run_claude(full_prompt):
     """ワーカースレッド本体。ここでは bpy を一切触らない。
 
@@ -547,15 +607,18 @@ def _run_claude(full_prompt):
     mcp_config = _build_mcp_config(repo, mcp_python)
     if mcp_python:
         child_env["CLAUDE_IN_BLENDER_PYTHON"] = mcp_python
-    # MCP はアドオンのソースリポにある1台だけに絞り、組み込みツールは無効化する。
-    # グローバル設定の MCP まで毎回 spawn すると起動が数秒重くなる
-    # （実測で 6.1s → 4.2s）。scratch の書き込み・差分編集は MCP 側で担う。
+    # MCP はアドオンのソースリポにある1台だけに絞る。グローバル設定の MCP まで毎回
+    # spawn すると起動が数秒重くなる（実測で 6.1s → 4.2s）。scratch の書き込み・
+    # 差分編集は MCP 側で担うので、組み込みツールは Skill だけ通す。
+    # --tools は「使える組み込みツール」、--allowedTools は「確認なしで通すもの」。
+    # 空の --tools は Skill も含めて全部落とすため、名指しで戻す必要がある。
+    # 開発者向けの setup / update / bridge までは開けない——モデリングの一枚だけ。
     cmd += [
         "--strict-mcp-config", "--mcp-config", str(mcp_config),
-        "--tools", "",
+        "--tools", "Skill",
         # 依頼文はプロセス一覧に出さないため stdin で渡す。
         "-p",
-        "--allowedTools", "mcp__claude-in-blender__*",
+        "--allowedTools", "Skill(blender-modeling)", "mcp__claude-in-blender__*",
         # stream-json はコールごとの usage が取れる唯一の形式（-p では --verbose 必須）。
         # json 一発だと usage が全コール合算になり、送信コストとして読めない。
         "--output-format", "stream-json", "--verbose",
@@ -567,7 +630,7 @@ def _run_claude(full_prompt):
             input=full_prompt,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(cwd_path),
-            timeout=300,
+            timeout=_CLAUDE_TIMEOUT_SEC,
             creationflags=flags,
             env=child_env,
         )
@@ -575,23 +638,9 @@ def _run_claude(full_prompt):
         if d is not None:
             text = str(d.get("result") or d.get("error") or p.stdout[:500])
             err = bool(d.get("is_error")) or p.returncode != 0
-            usage = ""
-            if last_usage:
-                # キャッシュ再利用=ほぼ無料で読めた分 / 新規=今回課金枠を食った分。
-                # 新規は通常入力とキャッシュ作成入力の両方である。
-                usage = "Cache reused {:,} / new {:,}".format(
-                    last_usage.get("cache_read_input_tokens") or 0,
-                    ((last_usage.get("input_tokens") or 0)
-                     + (last_usage.get("cache_creation_input_tokens") or 0)))
+            usage = _format_usage(last_usage)
             new_sid = d.get("session_id")
-            is_valid_session_id = (
-                isinstance(new_sid, str)
-                and re.fullmatch(
-                    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-                    new_sid.lower(),
-                )
-            )
-            if not err and is_valid_session_id and new_sid != session_id:
+            if not err and _is_session_id(new_sid) and new_sid != session_id:
                 saved = _save_session_id(
                     new_sid,
                     expected_cwd=cwd,
@@ -614,8 +663,27 @@ def _run_claude(full_prompt):
             err = True
             usage = ""
         _result_box = {"ready": True, "text": text, "error": err, "usage": usage}
-    except subprocess.TimeoutExpired:
-        _result_box = {"ready": True, "text": "Timeout (300s)", "error": True}
+    except subprocess.TimeoutExpired as expired:
+        # 打ち切っても、そこまでに届いた stdout は残る。捨てると育った線ごと消える——
+        # session を保存して、次の送信が続きになるようにする。作業自体は Blender 側に
+        # 適用済みのことが多いので、届いた本文もそのまま見せる。
+        partial_sid, partial_text, partial_usage = _partial_from_stream(expired.stdout)
+        text = f"Timeout ({_CLAUDE_TIMEOUT_SEC}s)"
+        if partial_sid and partial_sid != session_id:
+            saved = _save_session_id(
+                partial_sid,
+                expected_cwd=cwd,
+                expected_session_id=session_id,
+                expected_fork_from=fork_from,
+                clear_fork_from=bool(fork_from),
+            )
+            text += ("\nThe session was saved — send again to continue it."
+                     if saved else
+                     "\n(connection changed elsewhere; this conversation's session was not saved)")
+        if partial_text:
+            text += "\n\n--- received before the timeout ---\n" + partial_text
+        _result_box = {"ready": True, "text": text, "error": True,
+                       "usage": _format_usage(partial_usage)}
     except Exception as e:  # noqa: BLE001 - ワーカー例外を UI へ返し、送信失敗を観測可能にする。
         _result_box = {"ready": True, "text": f"Execution error: {e}", "error": True}
 
