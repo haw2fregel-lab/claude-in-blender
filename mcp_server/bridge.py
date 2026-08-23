@@ -81,16 +81,26 @@ class BlenderBridge:
                 while b"\n" not in buffer:
                     chunk = sock.recv(8192)
                     if not chunk:
-                        break
+                        return self._post_send_response_error(
+                            command,
+                            request_id,
+                            "Connection closed before a complete response was received",
+                        )
                     buffer += chunk
                     if len(buffer) > max_response:
-                        return self._connection_error(
+                        return self._post_send_response_error(
+                            command,
+                            request_id,
                             f"Response too large ({len(buffer)} bytes)"
                         )
             line = buffer.split(b"\n", 1)[0]
             result = json.loads(line.decode("utf-8"))
             if not isinstance(result, dict) or "ok" not in result:
-                return self._connection_error("Malformed response from Blender bridge")
+                return self._post_send_response_error(
+                    command,
+                    request_id,
+                    "Malformed response from Blender bridge",
+                )
             return result
         except ConnectionRefusedError:
             return self._connection_error(
@@ -98,13 +108,11 @@ class BlenderBridge:
             )
         except TimeoutError:
             if command == "execute_code" and send_started:
-                return self._connection_error(
+                return self._unknown_outcome(
+                    request_id,
                     f"No response from Blender in {timeout_seconds}s "
-                    f"(request {request_id}). Outcome unknown; call "
-                    f"get_request_status for {request_id} before another execute.",
+                    "after the request was sent",
                     elapsed_ms=timeout_seconds * 1000,
-                    request_id=request_id,
-                    status="outcome_unknown",
                 )
             if not send_started:
                 return self._connection_error(
@@ -118,8 +126,29 @@ class BlenderBridge:
                 request_id=request_id,
             )
         except json.JSONDecodeError:
+            return self._post_send_response_error(
+                command,
+                request_id,
+                "Invalid response from Blender (not valid JSON)",
+            )
+        except UnicodeDecodeError as error:
+            if command == "execute_code" and send_started:
+                return self._unknown_outcome(
+                    request_id,
+                    f"Invalid response from Blender (not valid UTF-8: {error})",
+                )
             return self._connection_error(
-                "Invalid response from Blender (not valid JSON)"
+                f"Invalid response from Blender (not valid UTF-8: {error})"
+            )
+        except OSError as error:
+            if command == "execute_code" and send_started:
+                return self._unknown_outcome(
+                    request_id,
+                    "Communication error after the request was sent "
+                    f"({type(error).__name__}: {error})",
+                )
+            return self._connection_error(
+                f"Communication error ({type(error).__name__}: {error})"
             )
 
     def _ack_request_result(self, operation_id: str) -> None:
@@ -133,6 +162,28 @@ class BlenderBridge:
             )
         except Exception:  # noqa: BLE001 - ACK failure must not hide delivered result
             pass
+
+    @classmethod
+    def _post_send_response_error(
+        cls, command: str, request_id: str, message: str
+    ) -> dict:
+        """Keep read-only commands' envelope while guarding execute_code resends."""
+        if command == "execute_code":
+            return cls._unknown_outcome(request_id, message)
+        return cls._connection_error(message)
+
+    @classmethod
+    def _unknown_outcome(
+        cls, request_id: str, reason: str, elapsed_ms: int = 0
+    ) -> dict:
+        """Return the recovery contract for a request that may have changed Blender."""
+        return cls._connection_error(
+            f"{reason} (request {request_id}). Outcome unknown; call "
+            f"get_request_status for {request_id} before another execute.",
+            elapsed_ms=elapsed_ms,
+            request_id=request_id,
+            status="outcome_unknown",
+        )
 
     @staticmethod
     def _connection_error(
