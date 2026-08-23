@@ -66,7 +66,9 @@ def test_second_call_uses_cache_without_spawning_again(monkeypatch):
 
 
 def test_run_claude_passes_env_with_injected_path(monkeypatch, tmp_path):
-    (tmp_path / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    # repo キーを書かない旧形式なので、cwd 自身がアドオンのソースを兼ねる。
+    (tmp_path / "mcp_server").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "mcp_server" / "server.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         panel,
         "_load_bridge",
@@ -171,7 +173,9 @@ class TestPythonForMcp:
 # 壊れる（3.13 は実行時に os.name を見る）ので、統合側は判定関数をモックして
 # 配線——返り値が child env に載ること——だけを見る。判定自体は上の単体が担保。
 def _spawn_seen_env(monkeypatch, tmp_path, python_for_mcp):
-    (tmp_path / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    # repo キーを書かない旧形式なので、cwd 自身がアドオンのソースを兼ねる。
+    (tmp_path / "mcp_server").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "mcp_server" / "server.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         panel,
         "_load_bridge",

@@ -1,12 +1,19 @@
 ---
-description: Blender パネルにこのセッションの写しを持たせる。「Blender 繋いで」「橋かけて」「繋ぎ直して」で使う。
+description: Blender パネルにこのセッションの写しを持たせ、いるリポを作業ディレクトリにする。「Blender 繋いで」「橋かけて」「繋ぎ直して」で使う。
 ---
 
 # 橋の繋ぎ直し
 
 Blender パネル（claude-in-blender）に、いま話しているこのセッションの写しを持たせる。
+同時に、**いま開いているリポがパネルの作業ディレクトリになる**——claude-in-blender の
+リポである必要はない。自分のプロジェクトで実行すれば、パネルからの依頼はそこで動く。
+
+アドオンのソース（`--repo`）は `/blender-setup` が登録した値をそのまま使うので、
+ここでは触らない。まだ一度も setup していない環境では、先に `/blender-setup` へ。
 
 1. `python tools/bridge_register.py --cwd .` を実行する。
+   `--cwd` は Claude を起動する作業ディレクトリ。ここに `.mcp.json` は要らない。
+   実行のたびにパネルのドロップダウン（`Work dir:`）へ履歴として積まれ、最新5件まで残る。
    スキル実行中のセッションでは `CLAUDE_CODE_SESSION_ID` を使い、正確に
    「このセッション」の fork 元として登録する。環境変数が無い場合だけ、cwd のプロジェクトの
    transcript のうち最新のものを fallback として使う。

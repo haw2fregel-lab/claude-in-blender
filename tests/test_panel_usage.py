@@ -70,7 +70,9 @@ def test_empty_stdout():
 
 
 def _run_with_stdout(monkeypatch, tmp_path, stdout):
-    (tmp_path / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    # repo キーを書かない旧形式なので、cwd 自身がアドオンのソースを兼ねる。
+    (tmp_path / "mcp_server").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "mcp_server" / "server.py").write_text("", encoding="utf-8")
     session_id = "11111111-1111-1111-1111-111111111111"
     monkeypatch.setattr(
         panel,

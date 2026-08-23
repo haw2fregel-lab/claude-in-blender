@@ -145,6 +145,28 @@ def _load_bridge():
     return data if isinstance(data, dict) else None
 
 
+def _resolve_paths(bridge):
+    """登録情報から作業ディレクトリとアドオンのソースリポを返す。"""
+    if not isinstance(bridge, dict):
+        return None, None
+    cwd = bridge.get("cwd") or None
+    repo = bridge.get("repo") or cwd
+    return cwd, repo
+
+
+def _recent_cwds(bridge):
+    """登録情報から作業ディレクトリの履歴を返す。旧形式は cwd だけを履歴にする。"""
+    if not isinstance(bridge, dict):
+        return []
+    recent = bridge.get("recent_cwds")
+    if recent is None:
+        cwd = bridge.get("cwd")
+        return [cwd] if isinstance(cwd, str) and cwd else []
+    if not isinstance(recent, list):
+        return []
+    return [cwd for cwd in recent if isinstance(cwd, str) and cwd]
+
+
 def _matches_bridge_preconditions(data, expected_cwd, expected_session_id,
                                   expected_fork_from=_EXPECTED_SESSION_UNSET):
     """CAS 保存の前提が現在の bridge 設定にも残っているかを返す。"""
@@ -189,6 +211,30 @@ def _save_session_id(session_id, expected_cwd=None,
             data["session_id"] = session_id
             if clear_fork_from:
                 data.pop("fork_from", None)
+            data["registered_by"] = "claude_bridge panel"
+            temp_file = bridge_file.with_suffix(".json.tmp")
+            temp_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(temp_file, bridge_file)
+            return True
+    except OSError:
+        return False
+
+
+def _save_cwd(cwd):
+    """作業ディレクトリを切り替え、現在のセッション接続を外す。"""
+    bridge_file = _bridge_file()
+    try:
+        with _bridge_file_lock, _lock_bridge_file(bridge_file):
+            data = _load_bridge()
+            if data is None:
+                return False
+            if data.get("cwd") == cwd:
+                return True
+            data = dict(data)
+            data["cwd"] = cwd
+            data["session_id"] = None
+            data.pop("fork_from", None)
             data["registered_by"] = "claude_bridge panel"
             temp_file = bridge_file.with_suffix(".json.tmp")
             temp_file.write_text(
@@ -382,10 +428,9 @@ def _login_shell_path():
 
 
 def _python_for_mcp(path_value):
-    # .mcp.json の command は ${CLAUDE_IN_BLENDER_PYTHON:-python}。macOS は
-    # python コマンドが無いことが多く（Homebrew / python.org とも python3 のみ）、
-    # fork spawn 時にこの変数で実体パスを渡して MCP server を立てられるようにする。
-    # Windows は default の python で従来通り動くため触らない。
+    # macOS は python コマンドが無いことが多い（Homebrew / python.org とも python3 のみ）。
+    # パネルが組む MCP config に実体パスを入れられるよう、login shell の PATH から探す。
+    # 明示済みの環境変数は呼び出し側で優先する。Windows は default の python を使う。
     if os.name == "nt" or os.environ.get("CLAUDE_IN_BLENDER_PYTHON"):
         return None
     for name in ("python", "python3"):
@@ -393,6 +438,19 @@ def _python_for_mcp(path_value):
         if p:
             return p
     return None
+
+
+def _build_mcp_config(repo, python):
+    """パネル専用 MCP server だけを有効にする config の JSON 文字列を返す。"""
+    server = Path(repo).expanduser().resolve() / "mcp_server" / "server.py"
+    return json.dumps({
+        "mcpServers": {
+            "claude-in-blender": {
+                "command": python or "python",
+                "args": [str(server)],
+            },
+        },
+    }, ensure_ascii=False, separators=(",", ":"))
 
 
 def _parse_stream_json(stdout):
@@ -432,26 +490,35 @@ def _run_claude(full_prompt):
     """
     global _result_box
     bridge = _load_bridge()
-    if not bridge:
+    if bridge is None:
         _result_box = {"ready": True, "error": True,
                        "text": "Not set up: run /blender-setup in Claude Code"}
         return
-    cwd = bridge.get("cwd")
+    cwd, repo = _resolve_paths(bridge)
     if not cwd:
         _result_box = {
             "ready": True,
             "error": True,
-            "text": ".mcp.json not found (setup directory not registered). "
-                    "If the repo moved, run /blender-setup again in Claude Code",
+            "text": "work directory not registered",
         }
         return
-    mcp_config = Path(cwd) / ".mcp.json"
-    if not mcp_config.exists():
+    cwd_path = Path(cwd).expanduser()
+    if not cwd_path.is_dir():
         _result_box = {
             "ready": True,
             "error": True,
-            "text": f".mcp.json not found ({mcp_config}). "
-                    "If the repo moved, run /blender-setup again in Claude Code",
+            "text": f"work directory not found ({cwd})",
+        }
+        return
+    server_path = ((Path(repo).expanduser().resolve() / "mcp_server" / "server.py")
+                   if repo else None)
+    if server_path is None or not server_path.is_file():
+        missing_path = str(server_path) if server_path else str(repo)
+        _result_box = {
+            "ready": True,
+            "error": True,
+            "text": f"add-on source not found ({missing_path}). "
+                    "If the repo moved, run /blender-setup again",
         }
         return
     claude = _find_claude(bridge)
@@ -474,7 +541,13 @@ def _run_claude(full_prompt):
         cmd += ["-r", session_id]
     elif model:
         cmd += ["--model", model]
-    # MCP はこのリポの1台だけに絞り、組み込みツールは無効化する。
+    child_env = {**os.environ, "PATH": _login_shell_path()}
+    mcp_python = (os.environ.get("CLAUDE_IN_BLENDER_PYTHON")
+                  or _python_for_mcp(child_env["PATH"]))
+    mcp_config = _build_mcp_config(repo, mcp_python)
+    if mcp_python:
+        child_env["CLAUDE_IN_BLENDER_PYTHON"] = mcp_python
+    # MCP はアドオンのソースリポにある1台だけに絞り、組み込みツールは無効化する。
     # グローバル設定の MCP まで毎回 spawn すると起動が数秒重くなる
     # （実測で 6.1s → 4.2s）。scratch の書き込み・差分編集は MCP 側で担う。
     cmd += [
@@ -489,15 +562,11 @@ def _run_claude(full_prompt):
     ]
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        child_env = {**os.environ, "PATH": _login_shell_path()}
-        mcp_python = _python_for_mcp(child_env["PATH"])
-        if mcp_python:
-            child_env["CLAUDE_IN_BLENDER_PYTHON"] = mcp_python
         p = subprocess.run(
             cmd,
             input=full_prompt,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=bridge.get("cwd") or str(Path.home()),
+            cwd=str(cwd_path),
             timeout=300,
             creationflags=flags,
             env=child_env,
@@ -723,6 +792,39 @@ class CLAUDE_OT_pick_model(bpy.types.Operator):
         return {"FINISHED"}
 
 
+_cwd_items_cache = ()
+
+
+def _cwd_items(_self, _context):
+    """履歴を作業ディレクトリ選択用の enum items にする。"""
+    global _cwd_items_cache
+    bridge = _load_bridge() or {}
+    cwd, _repo = _resolve_paths(bridge)
+    recent = _recent_cwds(bridge)
+    if cwd and cwd not in recent:
+        recent = [cwd] + recent
+    _cwd_items_cache = tuple(
+        (path, Path(path).name or path, path)
+        for path in recent
+    )
+    return _cwd_items_cache
+
+
+class CLAUDE_OT_pick_cwd(bpy.types.Operator):
+    bl_idname = "claude.pick_cwd"
+    bl_label = "Select Work Directory"
+    bl_description = "Select the directory where Claude starts"
+
+    cwd: bpy.props.EnumProperty(name="Work directory", items=_cwd_items)
+
+    def execute(self, context):
+        if _save_cwd(self.cwd):
+            self.report({"INFO"}, "Work directory: " + self.cwd)
+        else:
+            self.report({"ERROR"}, "Could not write the bridge file")
+        return {"FINISHED"}
+
+
 class CLAUDE_OT_disconnect_session(bpy.types.Operator):
     bl_idname = "claude.disconnect_session"
     bl_label = "Disconnect"
@@ -759,6 +861,14 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             layout.label(text="Not set up", icon="ERROR", translate=False)
             layout.label(text="Run /blender-setup in Claude Code", translate=False)
             return
+        cwd_row = layout.row()
+        # 接続中は選ばせない。切り替えはセッションを外す操作なので、
+        # 会話を切る意思表示（Disconnect）を先に人へ通す。
+        cwd_row.enabled = not is_working and not connection_id
+        cwd_row.operator_menu_enum(
+            "claude.pick_cwd", "cwd",
+            text="Work dir: " + (Path(cwd).name or cwd),
+            icon="FILE_FOLDER", translate=False)
         if connection_id:
             row = layout.row(align=True)
             row.enabled = not is_working
@@ -859,7 +969,8 @@ class CLAUDE_PT_panel(bpy.types.Panel):
 
 classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_OT_clear_log,
            CLAUDE_OT_refresh_sessions, CLAUDE_OT_pick_session,
-           CLAUDE_OT_pick_model, CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
+           CLAUDE_OT_pick_model, CLAUDE_OT_pick_cwd,
+           CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
 
 _WM_PROPS = ("claude_bridge_prompt", "claude_bridge_status",
              "claude_bridge_reply", "claude_bridge_usage",

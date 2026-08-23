@@ -76,7 +76,7 @@ list your recent sessions by their opening message.
 | Session token | `<temp>/claude-in-blender/blender-session-token` | Created when the bridge starts; removed when it stops. |
 | Scratch scripts | `<temp>/claude-in-blender/scratch/<pid>-<random>/` — one directory per MCP server process | Created by scratch-file operations; a script can only be run by the process that wrote it. Directories accumulate (one per process) and remain until the temp directory is cleared. |
 | Conversation transcripts | Your Claude Code projects directory | Managed by Claude Code, not by this add-on. |
-| Bridge session registration | `~/.claude/blender-bridge-session.json` | Created or updated by bridge registration and panel connection changes; contains the cwd, Claude executable, fork source/session ID, model, and registration time. It persists until you delete the file. |
+| Bridge session registration | `~/.claude/blender-bridge-session.json` | Created or updated by bridge registration and panel connection changes; contains the work directory, the add-on source repository, up to five recently used work directories, the Claude executable, fork source/session ID, model, and registration time. It persists until you delete the file. |
 | Approval-repair backup | Beside `.claude.json`, as `.claude.json.bak-*` | Created only when approval repair changes `.claude.json`; keeps the pre-repair settings until you delete the backup. |
 | Viewport screenshot PNG | `<temp>/claude-in-blender/viewport-*.png` | Created when a viewport screenshot is requested and normally deleted after the MCP server reads it. A crash can leave it in temp; the next bridge start cleans it, or you can delete it manually. |
 

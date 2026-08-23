@@ -44,6 +44,8 @@ Everything you need to add lives in this repository: a Blender add-on + a bundle
 
 Want the panel to carry the context of another conversation? Say **connect Blender** (`/blender-bridge`). The panel forks that session and works from the copy — nothing is ever appended to the original session.
 
+**Work dir**, at the top of the panel, is where your requests run. Say *connect Blender* inside your own project and the panel moves there, with that repository's `CLAUDE.md` and skills in effect — it does not have to be this repository. Directories you have used stay in the dropdown (latest five). Switching drops the current conversation, so the picker is disabled while connected — disconnect first.
+
 Modeling know-how ships as a Skill ([`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)). Requests sent from the panel read it once per session — where names and enums moved in Blender 5.x, how data names behave under a translated UI, how to verify Geometry Nodes. **Feel free to copy it into your own repositories for Blender work elsewhere.**
 
 ## License

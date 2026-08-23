@@ -65,6 +65,22 @@ def latest_session(cwd):
     return files[0].stem if files else None
 
 
+def push_recent(data, cwd, limit=5):
+    """作業ディレクトリを履歴の先頭へ積み、重複と上限超過を除く。"""
+    if "recent_cwds" not in data:
+        previous = data.get("cwd")
+        recent = [previous] if isinstance(previous, str) and previous else []
+    elif not isinstance(data.get("recent_cwds"), list):
+        recent = []
+    else:
+        recent = data["recent_cwds"]
+    ordered = []
+    for path in [cwd] + recent:
+        if path not in ordered:
+            ordered.append(path)
+    data["recent_cwds"] = ordered[:limit]
+
+
 def find_claude():
     for name in ("claude", "claude.exe", "claude.cmd"):
         p = shutil.which(name)
@@ -83,12 +99,15 @@ def find_claude():
 
 def main():
     ap = argparse.ArgumentParser(description="Blender ブリッジのセッション登録")
-    ap.add_argument("--cwd", required=True, help="橋の作業ディレクトリ（.mcp.json のあるリポ）")
+    ap.add_argument("--cwd", required=True, help="Claude を起動する作業ディレクトリ")
+    ap.add_argument("--repo", default=None, help="アドオンのソースリポ（省略時は既存値を保持）")
     ap.add_argument("--session-id", default=None, help="fork 元セッション ID（省略で自動特定）")
     ap.add_argument("--cwd-only", action="store_true", help="cwd だけ登録（既存のセッション設定は変えない）")
     args = ap.parse_args()
 
     cwd = str(Path(args.cwd).resolve()).replace("\\", "/")
+    repo = (str(Path(args.repo).resolve()).replace("\\", "/")
+            if args.repo is not None else None)
     fork_from = None
     session_source = None
     if not args.cwd_only:
@@ -110,12 +129,15 @@ def main():
             except (OSError, json.JSONDecodeError):
                 data = {}
 
+        push_recent(data, cwd)
         data.update({
             "cwd": cwd,
             "claude_exe": data.get("claude_exe") or find_claude(),
             "registered_at": time.strftime("%Y-%m-%d %H:%M"),
             "registered_by": "bridge_register.py",
         })
+        if repo is not None:
+            data["repo"] = repo
         if not args.cwd_only:
             data["fork_from"] = fork_from
             data["session_id"] = None

@@ -41,9 +41,20 @@ class FakeOperator:
         self.reports.append((set(level), str(message)))
 
 
+class FakePanel:
+    """`bpy.types.Panel` の身代わり。理由は FakeOperator と同じ。
+
+    こちらはテストから `draw` を呼んで、layout へ何が置かれたかを読むために要る。
+    register されないので RNA の機能は持たず、`layout` はテストが差し込む。
+    """
+
+    layout = None
+
+
 _bpy = sys.modules["bpy"]
 if isinstance(_bpy, MagicMock):
     _bpy.types.Operator = FakeOperator
+    _bpy.types.Panel = FakePanel
 
 bridge_package = types.ModuleType("claude_bridge")
 bridge_package.__path__ = [str(ROOT / "claude_bridge")]
@@ -379,14 +390,20 @@ class BridgeSessionFile:
 
     path: Path
     project: Path
+    addon_repo: Path
 
     @property
     def cwd(self):
         """登録される cwd。tools/bridge_register.py と同じく posix 区切りで書く。"""
         return str(self.project).replace("\\", "/")
 
+    @property
+    def repo(self):
+        """登録される repo（アドオンのソース）。cwd と同じ書き方に揃える。"""
+        return str(self.addon_repo).replace("\\", "/")
+
     def write(self, **fields):
-        payload = {"cwd": self.cwd}
+        payload = {"cwd": self.cwd, "repo": self.repo}
         payload.update(fields)
         self.path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -402,16 +419,21 @@ def bridge_session_file(tmp_path, monkeypatch):
     """bridge session ファイルを temp へ寄せる。ユーザー本物の登録を触らせない。
 
     置き場の付け替えは CLAUDE_CONFIG_DIR（Claude Code 自身の環境変数）で行う。
-    cwd には .mcp.json のある実ディレクトリが要るので、ここで一緒に用意する。
+    cwd（作業ディレクトリ）と repo（アドオンのソース）は別の実ディレクトリなので、
+    両方をここで用意する。repo には送信前の存在チェックが見る mcp_server/server.py を置く。
     """
     config_dir = tmp_path / "claude-config"
     config_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     project = tmp_path / "project"
     project.mkdir(parents=True, exist_ok=True)
-    (project / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    addon_repo = tmp_path / "addon-repo"
+    (addon_repo / "mcp_server").mkdir(parents=True, exist_ok=True)
+    (addon_repo / "mcp_server" / "server.py").write_text("", encoding="utf-8")
     return BridgeSessionFile(
-        path=config_dir / "blender-bridge-session.json", project=project
+        path=config_dir / "blender-bridge-session.json",
+        project=project,
+        addon_repo=addon_repo,
     )
 
 

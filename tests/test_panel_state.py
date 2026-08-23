@@ -142,9 +142,11 @@ _MISSING = object()
 
 
 def _project_cwd(tmp_path):
+    # repo キーを書かない旧形式の登録を通すので、cwd 自身がアドオンのソースを兼ねる。
+    # 送信前の存在チェックが見るのは mcp_server/server.py。
     cwd = tmp_path / "project"
-    cwd.mkdir(parents=True, exist_ok=True)
-    (cwd / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    (cwd / "mcp_server").mkdir(parents=True, exist_ok=True)
+    (cwd / "mcp_server" / "server.py").write_text("", encoding="utf-8")
     return str(cwd).replace("\\", "/")
 
 

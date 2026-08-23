@@ -48,10 +48,17 @@ CLI で入れられない場合（blender が見つからない・サブコマ�
 > Blender の Edit > Preferences > Get Extensions → 右上の v メニュー →
 > **Install from Disk** で `dist/claude_bridge-<version>.zip` を選ぶ
 
-## 4. 橋の登録（cwd + このセッション）
+## 4. 橋の登録（repo + cwd + このセッション）
 
-`python tools/bridge_register.py --cwd .` を実行する。スキル実行中は `CLAUDE_CODE_SESSION_ID`
+`python tools/bridge_register.py --cwd . --repo .` を実行する。スキル実行中は `CLAUDE_CODE_SESSION_ID`
 でこのセッションを正確に登録する。出力に `(env)` が無い fallback 時のみ、session 末尾8文字を控える。
+
+`--repo` はアドオンのソース（このリポ）。パネルはここから MCP サーバーを起動するので、
+セットアップ時に一度書けば以後は変わらない——リポを移した時だけ、このスキルを打ち直す。
+
+`--cwd` は Claude を起動する作業ディレクトリ。ここは `.mcp.json` が無くてよく、初回は
+このリポで揃うが、以後は自分のプロジェクトへ移せる（そのリポで `/blender-bridge` を実行するか、
+パネルのドロップダウンから選ぶ）。
 
 ## 5. MCP 承認ゲートの確認
 
@@ -79,7 +86,8 @@ CLI で入れられない場合（blender が見つからない・サブコマ�
   `export CLAUDE_IN_BLENDER_PYTHON="$(command -v python3)"` を足してから
   開き直すよう案内する（パネル経由の fork は設定不要——パネルが自動で渡す）。
 - Blender が未起動なら: 起動して 3D Viewport で N キー →「Claude」タブに
-  「Connected: ...<末尾8文字>」と「Bridge: running」が出ることを確認してもらう。
+  「Work dir: <ディレクトリ名>」「Connected: ...<末尾8文字>」「Bridge: running」が
+  出ることを確認してもらう。
 
 ## 報告
 
