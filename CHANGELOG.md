@@ -19,7 +19,8 @@ development milestones and were never published.
 - **Context toggles.** "Target my selection", "check the scene info first", "look up the
   docs first" and "check a screenshot first", each a single checkbox on the request.
 - **A traceable log.** `claude_bridge_log` keeps submitted code, 200-character result
-  excerpts, and error excerpts; it does not capture stdout or stderr and trims older lines
+  excerpts, and error messages — plus the full message and traceback when an error is too
+  large for the response; it does not capture stdout or stderr and trims older lines
   after 5,000 lines.
 - **Model selection** for requests that start a new session.
 - **File-switch notification.** If you open a different `.blend` along the way, the panel

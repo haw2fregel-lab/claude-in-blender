@@ -72,7 +72,7 @@ list your recent sessions by their opening message.
 
 | What | Where | Lifecycle and removal |
 | --- | --- | --- |
-| Submitted code, 200-character result excerpts, and error excerpts | `claude_bridge_log`, a Text datablock | Created by `execute_code` and saved inside your `.blend`; use the panel's **Clear log** button to remove it. It does not capture stdout or stderr, and after 5,000 lines it retains about 2,500 recent lines. |
+| Submitted code, 200-character result excerpts, and error messages — plus the full message and traceback when an error is too large for the response (over 2 KB) | `claude_bridge_log`, a Text datablock | Created by `execute_code` and saved inside your `.blend`; use the panel's **Clear log** button to remove it. It does not capture stdout or stderr, and after 5,000 lines it retains about 2,500 recent lines. |
 | Session token | `<temp>/claude-in-blender/blender-session-token` | Created when the bridge starts; removed when it stops. |
 | Scratch scripts | `<temp>/claude-in-blender/scratch/` | Created by scratch-file operations; remain until the temp directory is cleared. |
 | Conversation transcripts | Your Claude Code projects directory | Managed by Claude Code, not by this add-on. |
@@ -81,8 +81,9 @@ list your recent sessions by their opening message.
 | Viewport screenshot PNG | `<temp>/claude-in-blender/viewport-*.png` | Created when a viewport screenshot is requested and normally deleted after the MCP server reads it. A crash can leave it in temp; the next bridge start cleans it, or you can delete it manually. |
 
 **The log lives in your `.blend`.** If you share or publish a `.blend` file that was used
-with this add-on, you are also sharing submitted code plus result and error excerpts. Use
-the panel's **Clear log** button before handing the file to someone else.
+with this add-on, you are also sharing submitted code, result excerpts, error messages,
+and possibly the full traceback of a large error. Use the panel's **Clear log** button
+before handing the file to someone else.
 
 The add-on itself does not request or use API keys. Authentication and usage both run
 through your already-logged-in Claude Code account — a subscription login spends
@@ -98,11 +99,14 @@ These are design decisions, not oversights. They are listed here so you can judg
   request, and the tool response tells Claude that the file changed. The operation itself
   is not refused — the judgement is deliberately left to you and to Claude. An operation
   that arrives after the switch acts on the file that is open at that moment.
-- **A request in flight cannot be cancelled.** The 30-second per-script deadline uses
+- **A request in flight cannot be cancelled, and the UI freezes while code runs.**
+  Mutating code runs on Blender's main thread, so a long operation makes Blender appear
+  unresponsive — it is working, not broken. The 30-second per-script deadline uses
   `sys.settrace`, so it is not a hard stop and can be exceeded while a native call blocks.
   The 60-second bridge wait for Blender's main thread and the 300-second panel wait are
   caller observation deadlines: the Blender-side operation can continue, and there is no
-  rollback. Closing the panel does not stop the Claude process that was launched.
+  rollback. Save your work before asking for a heavy operation. Closing the panel does
+  not stop the Claude process that was launched.
 - **`CLAUDE_BRIDGE_EXECUTE=0` is read once, when the bridge starts.** Changing the
   environment variable while Blender is running has no effect until the add-on is
   re-enabled.

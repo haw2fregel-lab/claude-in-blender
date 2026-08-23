@@ -16,15 +16,16 @@ Everything you need to add lives in this repository: a Blender add-on + a bundle
 - Context toggles — "target my selection", "check the scene info first", "look up the docs first", and "check a screenshot first" — each available as a single checkbox per request
 - The panel uses a **fork** of your existing Claude Code session — your conversation context and CLAUDE.md carry over, while the original session is never written to. The panel uses its own model selection and restricted tool/MCP configuration.
 - If the `.blend` changes, the panel warns before the next request and the tool response reports the switch as `file_switched`. In-flight operations are not blocked.
-- **`claude_bridge_log`** in Blender's Text Editor keeps submitted code, 200-character result excerpts, and error excerpts. It does not capture stdout or stderr; after 5,000 lines, it trims the older side and retains about 2,500 recent lines.
+- **`claude_bridge_log`** in Blender's Text Editor keeps submitted code, 200-character result excerpts, and error messages — and when an error is too large for the response (over 2 KB), its full message and traceback go to the log. It does not capture stdout or stderr; after 5,000 lines, it trims the older side and retains about 2,500 recent lines.
 
 ## Security
 
 - **No additional credentials to configure** — authentication and billing both run through your logged-in Claude Code account: a subscription login spends subscription quota, an API account bills through the API. The add-on itself does not request or use API keys; Python passed through `execute_code` has Blender's full file and network access
 - **Pressing Send is your approval.** Claude Code's built-in file and shell tools are disabled, but every bundled MCP tool is pre-approved for that request — there is no second confirmation once you send
 - **`execute_code` is not a sandbox** — it runs Python inside Blender, so assume it can do anything the Blender process can. `CLAUDE_BRIDGE_EXECUTE=0` disables it
+- **Long operations make Blender's UI appear frozen** — mutating code runs on Blender's main thread, with no hard cancellation and no rollback. Save your work before asking for a heavy operation
 - **Claude can search this project's past sessions** (`search_session_history`), and the panel reads the same transcripts to list your recent sessions
-- **The log is stored inside your `.blend`** — `claude_bridge_log` travels with the file and can contain submitted code plus result and error excerpts. Clear it before sharing the file
+- **The log is stored inside your `.blend`** — `claude_bridge_log` travels with the file and can contain submitted code, result excerpts, error messages, and the full traceback of any large error. Clear it before sharing the file
 - Only one bridge can be active for the same user at a time (default port 9877). It listens on 127.0.0.1 only and requires a session token — this protects against other machines, not against other processes running under your account
 
 **Read [SECURITY.md](SECURITY.md)** for the full trust boundary, where each kind of data lives, and how to turn things off.
