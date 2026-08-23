@@ -12,6 +12,6 @@ blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-network = "Local bridge; code run through execute_code may make network connections"
-files = "Bridge/session/temp files; code run through execute_code may read or write files"
+network = "Local bridge; execute_code may make network connections"
+files = "Bridge/temp files; execute_code may read or write files"
 clipboard = "Copy Claude's reply"
