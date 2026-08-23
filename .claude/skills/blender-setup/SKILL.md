@@ -18,13 +18,24 @@ description: claude-in-blender の初期セットアップ。Python 依存 → �
 
 `python tools/build_extension.py` を実行し、出力された zip のパスを控える。
 
+Blender が複数入っている環境では、候補を列挙して validate 前に止まる（zip は作られる）。
+その時は列挙をそのまま利用者に見せ、どの Blender を使うか選んでもらってから
+`python tools/build_extension.py --blender "<選ばれた path>"` で validate まで通す。
+利用者に確認せず片方に決めない。
+
 ## 3. Blender へアドオンをインストール
 
-Blender の実行ファイルを探す（複数あれば最新バージョン）:
+インストール先は、手順2の validate に使った Blender と**同じ実行ファイル**。
+`--blender` で選んだ場合はその path をそのまま使う。
+
+手順2が単一候補で素通りした場合の探し先:
 
 - Windows 標準: `C:\Program Files\Blender Foundation\Blender *\blender.exe`
 - macOS 標準: `/Applications/Blender*.app/Contents/MacOS/Blender`
 - PATH 上の `blender`
+
+ここで複数見つかった時も、利用者に選んでもらう（validate と install の対象が割れたら、
+選ばれた path で手順2からやり直す）。
 
 見つかったら、決め打ちせず先に `"<blender>" --command extension --help` を実行して、
 ローカル zip をインストールするサブコマンドの有無と正確な引数を確認する
@@ -73,4 +84,6 @@ CLI で入れられない場合（blender が見つからない・サブコマ�
 ## 報告
 
 やったこと・できなかったこと（と手動での代替手順）を分けて報告する。
+validate / install に使った Blender の path とバージョンを明記する（複数入っている
+環境で、どれに入ったかを利用者があとから確かめられるように）。
 パネルから一発送れば全経路のテストになることを添える。
