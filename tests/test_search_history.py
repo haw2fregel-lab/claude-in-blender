@@ -125,10 +125,13 @@ def unreadable(monkeypatch):
     """名前で指定したファイルだけ、開こうとすると失敗するようにする factory。
 
     権限ビットで読めなくする手は Windows では効かないので、読み取り経路
-    （`builtins.open` と、pathlib が内側で呼ぶ `io.open`）を包んで、その1本だけ
-    落とす。他のファイルは素通りする。
+    （`builtins.open`・`io.open`・`pathlib.Path.open`）を包んで、その1本だけ
+    落とす。他のファイルは素通りする。Path.open まで包むのは、py3.10 の
+    pathlib が io.open を accessor へ束縛済みで、io.open の差し替えが
+    届かないため。
     """
     real_open = io.open
+    real_path_open = Path.open
     failures = {}
 
     def guarded(file, *args, **kwargs):
@@ -144,6 +147,14 @@ def unreadable(monkeypatch):
 
     monkeypatch.setattr(io, "open", guarded)
     monkeypatch.setattr(builtins, "open", guarded)
+
+    def guarded_path_open(self, *args, **kwargs):
+        error = failures.get(self.name)
+        if error is not None:
+            raise error
+        return real_path_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_path_open)
 
     def block(name, error=None):
         failures[name] = error or OSError(errno.EACCES, "unreadable session file", name)
