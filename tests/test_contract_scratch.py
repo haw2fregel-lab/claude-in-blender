@@ -109,7 +109,9 @@ def test_a_rewritten_scratch_file_runs_as_the_new_content(
 
     rewritten = _returned_path(server.write_scratch(_NAME, "result = 'second run'\n"))
 
-    assert rewritten == path, "契約4: 同じ名前なら同じ path が返る"
+    # 同じ名前が同じ path を指すのは、同じプロセスの中での話。プロセスを跨ぐと
+    # 別の namespace になる（tests/test_contract_scratch_namespace.py が見る）。
+    assert rewritten == path, "契約4: 同じプロセスの中では、同じ名前なら同じ path が返る"
     assert _only_text(server.execute_file(path)) == "second run", (
         "契約4: execute_file が走らせるのは、その時点のファイルの中身"
     )

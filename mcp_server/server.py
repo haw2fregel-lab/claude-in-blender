@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -11,7 +12,15 @@ from mcp.types import ImageContent, TextContent
 
 from bridge import BlenderBridge
 
-_SCRATCH_DIR = os.path.join(tempfile.gettempdir(), "claude-in-blender", "scratch")
+# scratch は MCP server プロセスごとに分ける。desktop session と panel fork のような別プロセスが
+# 同名スクリプトを書き合っても、実行対象を取り違えない。pid は生存中のプロセス間で一意、
+# 後ろの suffix は pid が再利用された時に前のプロセスの残骸を引き継がないための区別。
+_SCRATCH_DIR = os.path.join(
+    tempfile.gettempdir(),
+    "claude-in-blender",
+    "scratch",
+    f"{os.getpid()}-{uuid.uuid4().hex[:8]}",
+)
 _SCRATCH_MAX_BYTES = 1024 * 1024
 _CLAUDE_CONFIG_DIR = Path(
     os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"

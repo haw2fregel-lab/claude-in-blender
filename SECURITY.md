@@ -74,7 +74,7 @@ list your recent sessions by their opening message.
 | --- | --- | --- |
 | Submitted code, 200-character result excerpts, and error messages — plus the full message and traceback when an error is too large for the response (over 2 KB) | `claude_bridge_log`, a Text datablock | Created by `execute_code` and saved inside your `.blend`; use the panel's **Clear log** button to remove it. It does not capture stdout or stderr, and after 5,000 lines it retains about 2,500 recent lines. |
 | Session token | `<temp>/claude-in-blender/blender-session-token` | Created when the bridge starts; removed when it stops. |
-| Scratch scripts | `<temp>/claude-in-blender/scratch/` | Created by scratch-file operations; remain until the temp directory is cleared. |
+| Scratch scripts | `<temp>/claude-in-blender/scratch/<pid>-<random>/` — one directory per MCP server process | Created by scratch-file operations; a script can only be run by the process that wrote it. Directories accumulate (one per process) and remain until the temp directory is cleared. |
 | Conversation transcripts | Your Claude Code projects directory | Managed by Claude Code, not by this add-on. |
 | Bridge session registration | `~/.claude/blender-bridge-session.json` | Created or updated by bridge registration and panel connection changes; contains the cwd, Claude executable, fork source/session ID, model, and registration time. It persists until you delete the file. |
 | Approval-repair backup | Beside `.claude.json`, as `.claude.json.bak-*` | Created only when approval repair changes `.claude.json`; keeps the pre-repair settings until you delete the backup. |
