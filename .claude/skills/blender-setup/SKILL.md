@@ -25,6 +25,10 @@ Blender が複数入っている環境では、候補を列挙して validate �
 
 ## 3. Blender へアドオンをインストール
 
+Blender が起動中でないか確認し、未起動なら CLI 手順を、起動中なら手動手順を使う。
+
+**CLI 手順**
+
 インストール先は、手順2の validate に使った Blender と**同じ実行ファイル**。
 `--blender` で選んだ場合はその path をそのまま使う。
 
@@ -42,8 +46,10 @@ Blender が複数入っている環境では、候補を列挙して validate �
 （Blender のバージョンで異なりうる）。使えるなら repo `user_default` へ有効化込みで
 インストールする。
 
-CLI で入れられない場合（blender が見つからない・サブコマンドが無い・失敗した）は、
-手動手順を案内して先へ進む:
+**手動手順**
+
+起動中のほか、CLI で入れられない時（blender が見つからない・サブコマンドが無い・
+失敗した）もこちら。利用者に次を案内して先へ進む:
 
 > Blender の Edit > Preferences > Get Extensions → 右上の v メニュー →
 > **Install from Disk** で `dist/claude_bridge-<version>.zip` を選ぶ
