@@ -2,7 +2,7 @@
 
 **English** | [日本語](README.ja.md)
 
-**Ask Claude Code — from inside Blender.** Same context, same CLAUDE.md — in a separate forked session. The original session is never touched.
+**Ask Claude Code — from inside Blender.** Your hands stay in the viewport — Claude sees your selection and helps from a side panel.
 
 claude-in-blender adds a small panel to Blender's N-panel and sends your requests to a fork of the Claude Code session you're already using. The connection runs in reverse: Claude does the work by driving Blender directly through the bundled MCP server — carrying over the context of your desktop conversation, without ever leaving Blender.
 
