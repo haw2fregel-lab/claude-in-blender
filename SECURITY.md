@@ -36,7 +36,10 @@ Sending a request from the panel launches Claude Code with these flags:
 ```
 --strict-mcp-config --mcp-config <generated: one server> \
 --tools Skill -p \
---allowedTools "Skill(blender-modeling)" mcp__claude-in-blender__*
+--allowedTools "Skill(blender-modeling)" "Skill(blender-quick-edit)" \
+    "Skill(blender-param-panel)" "Skill(blender-modifier-inject)" \
+    mcp__claude-in-blender__* \
+--disallowedTools "Skill(blender-setup)" "Skill(blender-update)" "Skill(blender-bridge)"
 ```
 
 Read that as three separate facts:
@@ -46,9 +49,13 @@ Read that as three separate facts:
   generated at send time and names exactly one server: the one shipped with this add-on.
   Anything else you have connected to Claude Code is out of reach from the panel.
 - **Built-in tools are limited to `Skill`.** No file reads, no file writes, no shell, no
-  web. `Skill` is enabled only so the request can load the bundled modeling notes, and
-  `--allowedTools` narrows it to `blender-modeling` alone — the setup, update, and bridge
-  skills stay closed.
+  web. `Skill` is enabled so requests can load the bundled skills (the modeling notes and
+  the three adjustment skills). Two honest caveats: the `--allowedTools` entries do **not**
+  act as a filter — in current Claude Code, a skill *not* named there can still load, so
+  any skill present in the work directory's repository is readable by a request. What
+  actually closes a skill is `--disallowedTools`, which is why the developer skills
+  (setup, update, bridge) are denied there by name (verified by test: a denied skill fails
+  to load).
 - **What is left is pre-approved.** Once you press Send, Claude runs the bundled MCP tools
   and that one skill **without asking you again** for that request. The request runs
   non-interactively (`-p`), so there is no per-tool confirmation dialog to fall back on.

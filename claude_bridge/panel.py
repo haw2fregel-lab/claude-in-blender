@@ -619,13 +619,19 @@ def _run_claude(full_prompt):
     # 差分編集は MCP 側で担うので、組み込みツールは Skill だけ通す。
     # --tools は「使える組み込みツール」、--allowedTools は「確認なしで通すもの」。
     # 空の --tools は Skill も含めて全部落とすため、名指しで戻す必要がある。
-    # 開発者向けの setup / update / bridge までは開けない——モデリングの一枚だけ。
+    # --allowedTools の Skill(名前) は絞りとして効かない——名指しに無いスキルも -p で
+    # 通る（実測）。開発者向け setup / update / bridge を閉じる仕事は deny 側が担う
+    # （--disallowedTools は allow より優先で、こちらは実測で効く）。
     cmd += [
         "--strict-mcp-config", "--mcp-config", str(mcp_config),
         "--tools", "Skill",
         # 依頼文はプロセス一覧に出さないため stdin で渡す。
         "-p",
-        "--allowedTools", "Skill(blender-modeling)", "mcp__claude-in-blender__*",
+        "--allowedTools", "Skill(blender-modeling)", "Skill(blender-quick-edit)",
+        "Skill(blender-param-panel)", "Skill(blender-modifier-inject)",
+        "mcp__claude-in-blender__*",
+        "--disallowedTools", "Skill(blender-setup)", "Skill(blender-update)",
+        "Skill(blender-bridge)",
         # stream-json はコールごとの usage が取れる唯一の形式（-p では --verbose 必須）。
         # json 一発だと usage が全コール合算になり、送信コストとして読めない。
         "--output-format", "stream-json", "--verbose",

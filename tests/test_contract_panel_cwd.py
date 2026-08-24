@@ -617,15 +617,26 @@ def test_the_work_directory_picker_is_disabled_while_connected_or_sending(
 # リポに SKILL.md を置いても本文へ辿り着く経路が無い。
 # `--allowedTools` は「許可する旗」であって「使える Tool を増やす旗」ではないので、
 # そこへ書いても `--tools` で落とされた Tool は戻らない——だから両方を見る。
+# さらに `Skill(名前)` の引数付き許可は絞りとしては効かない——名指しに無いスキルも
+# -p で通る（実測 2026-08-25: allow が blender-modeling だけの状態で blender-update
+# が LOADED になった）。開発者向けスキルを閉じる仕事は `--disallowedTools` が担う
+# （同日実測で DENIED を確認。deny は allow より優先）。
 #
 # 固定するのは入口が開いていることだけ。読むかどうかはモデルの判断で、確実に読ませる
 # 指示は依頼文へ足さない（見えない追記をしない、の既存方針）。
 # 並び順と渡し方は実装の自由。載っているかどうかだけを見る。
 
+# ユーザー向けスキル。モデリングの作法と、効き具合を手に残す姉妹3枚。
+_USER_SKILLS = (
+    "Skill(blender-modeling)",
+    "Skill(blender-quick-edit)",
+    "Skill(blender-param-panel)",
+    "Skill(blender-modifier-inject)",
+)
 _MODELING_SKILL = "Skill(blender-modeling)"
 _BLENDER_TOOLS = "mcp__claude-in-blender__*"
 # 開発者向けスキル。パネルの利用者が、意図せず開発フロー（アドオンの焼き直し等）へ
-# 入らないよう、パネルからの起動では許可しない。
+# 入らないよう、パネルからの起動では deny で明示的に閉じる。
 _DEVELOPER_SKILLS = ("blender-setup", "blender-update", "blender-bridge")
 
 
@@ -641,13 +652,12 @@ def _flag_value(argv, flag):
     raise AssertionError(f"{flag} が渡っていない: {argv}")
 
 
-def _allowed_tools(argv):
-    """`--allowedTools` へ渡った値を、ひと続きのテキストにして返す。
+def _multi_flag_values(argv, flag):
+    """繰り返し可能な旗へ渡った値を、ひと続きのテキストにして返す。
 
     渡し方（1つの文字列 / 複数の値 / 旗の繰り返し / `=` 連結）は実装の自由なので、
     どの形も同じテキストとして読む。
     """
-    flag = "--allowedTools"
     collected = []
     index = 0
     while index < len(argv):
@@ -663,6 +673,14 @@ def _allowed_tools(argv):
         index += 1
     assert collected, f"{flag} が渡っていない: {argv}"
     return "\n".join(collected)
+
+
+def _allowed_tools(argv):
+    return _multi_flag_values(argv, "--allowedTools")
+
+
+def _disallowed_tools(argv):
+    return _multi_flag_values(argv, "--disallowedTools")
 
 
 def _names_the_tool(text, name):
@@ -719,22 +737,27 @@ def test_the_panel_leaves_the_skill_tool_switched_on(sent_argv):
     )
 
 
-def test_the_panel_allows_the_modeling_skill_and_the_blender_tools(sent_argv):
-    """契約: 残した Skill Tool を、モデリングのスキルへ通す。MCP tool は従来どおり。"""
+def test_the_panel_allows_the_user_facing_skills_and_the_blender_tools(sent_argv):
+    """契約: 残した Skill Tool を、ユーザー向けスキル4枚へ通す。MCP tool は従来どおり。
+
+    allow の名指しは今の Claude Code では絞りとして効かないが、意図の宣言として置く
+    ——将来 allow が絞りとして効くようになっても、この4枚は通り続けること。
+    """
     allowed = _allowed_tools(sent_argv)
 
-    assert _MODELING_SKILL in allowed, (
-        f"契約: モデリングの作法を書いたスキルを許可する: {allowed!r}"
-    )
+    for skill in _USER_SKILLS:
+        assert skill in allowed, (
+            f"契約: ユーザー向けスキル {skill} を許可する: {allowed!r}"
+        )
     assert _BLENDER_TOOLS in allowed, (
         f"従来どおり、Blender を触る MCP tool を許可する: {allowed!r}"
     )
 
 
 def test_the_panel_keeps_the_developer_skills_out_of_the_allowed_tools(sent_argv):
-    """契約: パネルの利用者が、意図せず開発フローへ入らないこと。
+    """契約: 開発者向けスキルを、許可の側にうっかり混ぜないこと。
 
-    許可を名指しの1件に留めるのも同じ理由——スキル名を伴わない `Skill` の許可は、
+    許可を名指しに留めるのも同じ理由——スキル名を伴わない `Skill` の許可は、
     リポにある開発者向けスキルまで一緒に通してしまう。
     """
     allowed = _allowed_tools(sent_argv)
@@ -744,8 +767,22 @@ def test_the_panel_keeps_the_developer_skills_out_of_the_allowed_tools(sent_argv
             f"契約: 開発者向けスキル {skill} はパネルからは許可しない: {allowed!r}"
         )
     assert not _allows_every_skill(allowed), (
-        f"許可はスキルを名指しで（{_MODELING_SKILL}）。裸の Skill は全部を通す: {allowed!r}"
+        f"許可はスキルを名指しで。裸の Skill は全部を通す: {allowed!r}"
     )
+
+
+def test_the_panel_denies_the_developer_skills_explicitly(sent_argv):
+    """契約: 開発者向けスキルは deny で名指しして閉じる。
+
+    「allow に載せない」だけでは閉じない——名指しに無いスキルも -p で通る（実測）。
+    実際に拒否が効くのは `--disallowedTools` の側（実測で DENIED を確認済み）。
+    """
+    disallowed = _disallowed_tools(sent_argv)
+
+    for skill in _DEVELOPER_SKILLS:
+        assert f"Skill({skill})" in disallowed, (
+            f"契約: 開発者向けスキル {skill} は deny で名指しして閉じる: {disallowed!r}"
+        )
 
 
 def test_the_panel_keeps_the_mcp_config_strict(sent_argv):
