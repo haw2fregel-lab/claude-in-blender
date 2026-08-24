@@ -44,13 +44,13 @@ Everything you need to add lives in this repository: a Blender add-on + a bundle
 
 Want the panel to carry the context of another conversation? Say **connect Blender** (`/blender-bridge`). The panel forks that session and works from the copy — nothing is ever appended to the original session.
 
-**Work dir**, at the top of the panel, is where your requests run. **It does not have to be this repository** — point it at your own project and that repository's `CLAUDE.md` and skills apply. To add one, run this from this repository:
+**Work dir**, at the top of the panel, is where your requests run. **It does not have to be this repository** — point it at your own project and that repository's `CLAUDE.md` and skills apply. The **+** next to the dropdown picks one in the file browser (one-off: it is not kept in the history). To register one into the history, run this from this repository:
 
 ```bash
 python tools/bridge_register.py --cwd /path/to/your/project
 ```
 
-Directories you have used stay in the dropdown (latest five). Switching drops the current conversation, so the picker is disabled while connected — disconnect first.
+Registered directories stay in the dropdown (latest five). Switching drops the current conversation, so both the picker and the **+** are disabled while connected — disconnect first.
 
 Modeling know-how ships as a Skill ([`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)) — where names and enums moved in Blender 5.x, how data names behave under a translated UI, how to verify Geometry Nodes. It is available to panel requests too, but whether Claude actually reads it is Claude's own call based on what you asked (no instruction forcing the load is added to your message). **Feel free to copy it into your own repositories for Blender work elsewhere.**
 

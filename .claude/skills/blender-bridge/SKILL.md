@@ -11,7 +11,8 @@ Blender パネル（claude-in-blender）に、いま話しているこのセッ�
 別のリポで Claude Code を開いてもここからは見えない。パネルの作業ディレクトリを
 別のリポにしたい時は、claude-in-blender で
 `python tools/bridge_register.py --cwd <path>` を実行するか、パネルのドロップダウンから
-選ぶ（一度登録すれば履歴に残る）。
+選ぶ（一度登録すれば履歴に残る）。ドロップダウン隣の＋なら、その場でファイルブラウザ
+から選べる（一度きり——履歴には積まれない）。
 
 アドオンのソース（`--repo`）は `/blender-setup` が登録した値をそのまま使うので、
 ここでは触らない。まだ一度も setup していない環境では、先に `/blender-setup` へ。
