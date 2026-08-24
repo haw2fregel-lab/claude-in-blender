@@ -52,7 +52,7 @@ python tools/bridge_register.py --cwd /path/to/your/project
 
 Registered directories stay in the dropdown (latest five). Switching drops the current conversation, so both the picker and the **+** are disabled while connected — disconnect first.
 
-Modeling know-how ships as a Skill ([`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)) — where names and enums moved in Blender 5.x, how data names behave under a translated UI, how to verify Geometry Nodes. It is available to panel requests too, but whether Claude actually reads it is Claude's own call based on what you asked (no instruction forcing the load is added to your message). **Feel free to copy it into your own repositories for Blender work elsewhere.**
+Modeling know-how ships as a Skill ([`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)) — where names and enums moved in Blender 5.x, how data names behave under a translated UI, how to verify Geometry Nodes. It is available to panel requests too, but whether Claude actually reads it is Claude's own call based on what you asked (no instruction forcing the load is added to your message). **Feel free to copy it into your own repositories for Blender work elsewhere** — unlike the rest of this repository (GPL-3.0), the skill is dedicated to the public domain ([CC0](.claude/skills/blender-modeling/LICENSE)), so no attribution and no license obligations follow it.
 
 ## License
 

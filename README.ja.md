@@ -54,7 +54,7 @@ python tools/bridge_register.py --cwd /path/to/your/project
 
 登録したディレクトリはドロップダウンに残ります（最新 5 件）。切り替えると今の会話は外れるため、接続中は選択も **＋** も使えません——先に切断してください。
 
-モデリングの作法は Skill として同梱しています（[`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)）。Blender 5.x で名前や enum が変わった場所、日本語 UI でのデータ名の扱い、Geometry Nodes の検証手順など。パネルからの依頼でも使えるようにしてありますが、実際に読むかどうかは Claude が依頼の内容から判断します（読み込みを強制する指示は、依頼文へ足していません）。**他のリポジトリでの Blender 作業にも、よかったらそのままコピーして使ってください。**
+モデリングの作法は Skill として同梱しています（[`.claude/skills/blender-modeling/`](.claude/skills/blender-modeling/SKILL.md)）。Blender 5.x で名前や enum が変わった場所、日本語 UI でのデータ名の扱い、Geometry Nodes の検証手順など。パネルからの依頼でも使えるようにしてありますが、実際に読むかどうかは Claude が依頼の内容から判断します（読み込みを強制する指示は、依頼文へ足していません）。**他のリポジトリでの Blender 作業にも、よかったらそのままコピーして使ってください**——リポ本体（GPL-3.0）と違い、このスキルは [CC0](.claude/skills/blender-modeling/LICENSE)（パブリックドメイン相当）なので、出所表示もライセンスの義務も付いていきません。
 
 ## ライセンス
 
