@@ -34,18 +34,25 @@ treat the bridge as open.
 Sending a request from the panel launches Claude Code with these flags:
 
 ```
---strict-mcp-config --mcp-config <repo>/.mcp.json --tools "" \
---allowedTools mcp__claude-in-blender__*
+--strict-mcp-config --mcp-config <generated: one server> \
+--tools Skill -p \
+--allowedTools "Skill(blender-modeling)" mcp__claude-in-blender__*
 ```
 
-Read that as two separate facts:
+Read that as three separate facts:
 
-- **Claude Code's built-in tools are disabled.** `--tools ""` means no file reads, no file
-  writes, no shell. The bundled MCP server is the only way out.
-- **Every bundled MCP tool is pre-approved.** `--allowedTools mcp__claude-in-blender__*`
-  means that once you press Send, Claude will run those tools **without asking you again**
-  for that request. There is no per-tool confirmation dialog. The Send button *is* the
-  approval.
+- **Only the bundled MCP server is visible.** `--strict-mcp-config` discards every MCP
+  server configured anywhere else — user-level, project-level, `.mcp.json`. The config is
+  generated at send time and names exactly one server: the one shipped with this add-on.
+  Anything else you have connected to Claude Code is out of reach from the panel.
+- **Built-in tools are limited to `Skill`.** No file reads, no file writes, no shell, no
+  web. `Skill` is enabled only so the request can load the bundled modeling notes, and
+  `--allowedTools` narrows it to `blender-modeling` alone — the setup, update, and bridge
+  skills stay closed.
+- **What is left is pre-approved.** Once you press Send, Claude runs the bundled MCP tools
+  and that one skill **without asking you again** for that request. The request runs
+  non-interactively (`-p`), so there is no per-tool confirmation dialog to fall back on.
+  The Send button *is* the approval.
 
 Your request text is passed on **stdin**, not as a command-line argument, so it does not
 appear in the process list.
