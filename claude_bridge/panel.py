@@ -255,7 +255,8 @@ def _save_cwd(cwd):
 # --model に渡すのは世代で腐らないエイリアスだけ。フル名を使いたい時は
 # bridge ファイルの "model" を直接編集すれば、表示も送信もそのまま通る。
 # 送信一回の上限。超えても届いた分は拾う（session を保存して続きから送れる）。
-_CLAUDE_TIMEOUT_SEC = 300
+# 300 では凝ったモデリング依頼が普通に超えた（実測2回）ので 600 に。
+_CLAUDE_TIMEOUT_SEC = 600
 
 _MODEL_ITEMS = (
     # "Default" 単体は Blender 本体の翻訳辞書に載っていて「デフォルト」に化ける
