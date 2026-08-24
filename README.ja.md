@@ -8,7 +8,7 @@ Blender の N パネルに小さな窓を開き、いま使っている Claude C
 
 足すものはこのリポジトリで完結します：Blender アドオン + 同梱 MCP サーバー。あとは、すでに使っている Claude Code。それだけ。
 
-> **v1.0.0** — 動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows（macOS/Linux は未確認） · [変更履歴](CHANGELOG.md) · [セキュリティ](SECURITY.md)
+> **v1.0.0** — 動作確認: Blender 5.1.2 / Claude Code 2.1.228 / Windows + macOS（Linux は未確認） · [変更履歴](CHANGELOG.md) · [セキュリティ](SECURITY.md)
 
 ## できること
 

@@ -8,7 +8,7 @@ claude-in-blender adds a small panel to Blender's N-panel and sends your request
 
 Everything you need to add lives in this repository: a Blender add-on + a bundled MCP server. Plus the Claude Code you already have — that's the whole stack.
 
-> **v1.0.0** — Tested on: Blender 5.1.2 / Claude Code 2.1.228 / Windows (macOS/Linux untested) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+> **v1.0.0** — Tested on: Blender 5.1.2 / Claude Code 2.1.228 / Windows + macOS (Linux untested) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
 
 ## What it does
 
