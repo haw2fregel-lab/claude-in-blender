@@ -900,6 +900,32 @@ class CLAUDE_OT_pick_cwd(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDE_OT_add_cwd(bpy.types.Operator):
+    bl_idname = "claude.add_cwd"
+    bl_label = "Add Work Directory"
+    bl_description = ("Pick a work directory in the file browser. "
+                      "One-off: not added to the dropdown history")
+
+    directory: bpy.props.StringProperty(subtype="DIR_PATH")
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        if not self.directory:
+            self.report({"ERROR"}, "No directory selected")
+            return {"CANCELLED"}
+        # ファイルブラウザは末尾セパレータ付きで返す。Path 正規化で
+        # ドライブルート（D:\）を壊さずに揃える。
+        cwd = str(Path(self.directory))
+        if _save_cwd(cwd):
+            self.report({"INFO"}, "Work directory: " + cwd)
+        else:
+            self.report({"ERROR"}, "Could not write the bridge file")
+        return {"FINISHED"}
+
+
 class CLAUDE_OT_disconnect_session(bpy.types.Operator):
     bl_idname = "claude.disconnect_session"
     bl_label = "Disconnect"
@@ -936,7 +962,7 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             layout.label(text="Not set up", icon="ERROR", translate=False)
             layout.label(text="Run /blender-setup in Claude Code", translate=False)
             return
-        cwd_row = layout.row()
+        cwd_row = layout.row(align=True)
         # 接続中は選ばせない。切り替えはセッションを外す操作なので、
         # 会話を切る意思表示（Disconnect）を先に人へ通す。
         cwd_row.enabled = not is_working and not connection_id
@@ -944,6 +970,7 @@ class CLAUDE_PT_panel(bpy.types.Panel):
             "claude.pick_cwd", "cwd",
             text="Work dir: " + (Path(cwd).name or cwd),
             icon="FILE_FOLDER", translate=False)
+        cwd_row.operator("claude.add_cwd", text="", icon="ADD")
         if connection_id:
             row = layout.row(align=True)
             row.enabled = not is_working
@@ -1044,7 +1071,7 @@ class CLAUDE_PT_panel(bpy.types.Panel):
 
 classes = (CLAUDE_OT_send, CLAUDE_OT_copy_reply, CLAUDE_OT_clear_log,
            CLAUDE_OT_refresh_sessions, CLAUDE_OT_pick_session,
-           CLAUDE_OT_pick_model, CLAUDE_OT_pick_cwd,
+           CLAUDE_OT_pick_model, CLAUDE_OT_pick_cwd, CLAUDE_OT_add_cwd,
            CLAUDE_OT_disconnect_session, CLAUDE_PT_panel)
 
 _WM_PROPS = ("claude_bridge_prompt", "claude_bridge_status",

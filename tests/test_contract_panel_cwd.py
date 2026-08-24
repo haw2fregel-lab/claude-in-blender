@@ -17,6 +17,7 @@
 この二つが別物になったのがこの案件で、テストもその二つを別のディレクトリで組む。
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -567,32 +568,35 @@ def drawable_panel(monkeypatch, panel_window_manager, bridge_session_file, tmp_p
     return install
 
 
+# 選ぶ・追加するは同じ「切り替え」の操作なので、無効になる条件も一つの表で共有する。
+_SWITCH_DISABLING_CASES = [
+    pytest.param({}, "IDLE", True, id="disconnected-and-idle"),
+    pytest.param(
+        {"session_id": None, "fork_from": None},
+        "IDLE",
+        True,
+        id="null-connection-keys-are-the-same-as-absent",
+    ),
+    pytest.param(
+        {"session_id": _STORED_SESSION}, "IDLE", False, id="connected-by-session_id"
+    ),
+    pytest.param(
+        {"fork_from": _FORK_SOURCE}, "IDLE", False, id="connected-by-fork_from"
+    ),
+    pytest.param({}, "WORKING", False, id="sending"),
+    pytest.param(
+        {"session_id": _STORED_SESSION},
+        "WORKING",
+        False,
+        id="connected-and-sending",
+    ),
+    pytest.param({}, "DONE", True, id="a-finished-send-is-not-sending"),
+    pytest.param({}, "ERROR", True, id="a-failed-send-is-not-sending"),
+]
+
+
 @pytest.mark.parametrize(
-    ("stored", "status", "expected_enabled"),
-    [
-        pytest.param({}, "IDLE", True, id="disconnected-and-idle"),
-        pytest.param(
-            {"session_id": None, "fork_from": None},
-            "IDLE",
-            True,
-            id="null-connection-keys-are-the-same-as-absent",
-        ),
-        pytest.param(
-            {"session_id": _STORED_SESSION}, "IDLE", False, id="connected-by-session_id"
-        ),
-        pytest.param(
-            {"fork_from": _FORK_SOURCE}, "IDLE", False, id="connected-by-fork_from"
-        ),
-        pytest.param({}, "WORKING", False, id="sending"),
-        pytest.param(
-            {"session_id": _STORED_SESSION},
-            "WORKING",
-            False,
-            id="connected-and-sending",
-        ),
-        pytest.param({}, "DONE", True, id="a-finished-send-is-not-sending"),
-        pytest.param({}, "ERROR", True, id="a-failed-send-is-not-sending"),
-    ],
+    ("stored", "status", "expected_enabled"), _SWITCH_DISABLING_CASES
 )
 def test_the_work_directory_picker_is_disabled_while_connected_or_sending(
     drawable_panel, stored, status, expected_enabled
@@ -1395,3 +1399,90 @@ def test_a_plain_registration_still_re_identifies_the_conversation(
     assert data["session_id"] is None, (
         f"契約4: 掴み直す相手ではなく fork 元なので、session_id は None: {data}"
     )
+
+
+# --- Add...: ファイルブラウザから一度きりの作業ディレクトリを選ぶ ---
+# 選んだ場所は cwd になるが、履歴（recent_cwds）へは積まない。雑に試した場所で、
+# `/blender-bridge` が積んだ正式な履歴を流さないため。積むのは bridge_register の
+# 役目のまま（E-1: setup = repo / bridge = 履歴 / パネル = 選ぶ）。
+# ファイルブラウザを開く所作（invoke → fileselect_add）は GUI なので実機で確かめる。
+
+_ADD_CWD_IDNAME = "claude.add_cwd"
+
+
+def test_an_added_directory_becomes_the_cwd_without_touching_the_history(
+    panel_window_manager, bridge_session_file, tmp_path
+):
+    work = _create_work_dir(tmp_path)
+    other = _posix(tmp_path / _OTHER_WORK_NAME)
+    _register(
+        bridge_session_file,
+        cwd=work,
+        repo=_create_addon_repo(tmp_path),
+        recent_cwds=[work, other],
+        session_id=_STORED_SESSION,
+    )
+    panel_window_manager()
+    picked = _create_dir(tmp_path, "one-off-experiment")
+
+    result = panel.CLAUDE_OT_add_cwd(directory=picked).execute(bpy.context)
+
+    assert result == {"FINISHED"}
+    data = bridge_session_file.read()
+    assert _is_same_place(data["cwd"], picked), f"契約: 選んだ場所が cwd になる: {data}"
+    assert data["recent_cwds"] == [work, other], (
+        f"契約: Add は一度きり。履歴へ積むのは bridge_register の役目のまま: {data}"
+    )
+    assert data.get("session_id") is None, (
+        f"切り替えなので接続は外す（_save_cwd と同じ筋）: {data}"
+    )
+
+
+def test_an_added_directory_loses_the_trailing_separator_the_browser_appends(
+    panel_window_manager, bridge_session_file, tmp_path
+):
+    """ファイルブラウザのディレクトリは末尾セパレータ付きで返る。そのまま書かない。"""
+    _register(bridge_session_file, cwd=_create_work_dir(tmp_path))
+    panel_window_manager()
+    picked = tmp_path / "browsed-directory"
+    picked.mkdir()
+
+    result = panel.CLAUDE_OT_add_cwd(directory=str(picked) + os.sep).execute(bpy.context)
+
+    assert result == {"FINISHED"}
+    registered = bridge_session_file.read()["cwd"]
+    assert _is_same_place(registered, picked)
+    assert not registered.endswith(("/", "\\")), (
+        f"末尾セパレータは落として登録する: {registered!r}"
+    )
+
+
+def test_an_empty_selection_is_rejected_without_touching_the_registration(
+    panel_window_manager, bridge_session_file, tmp_path
+):
+    path = _register(bridge_session_file, cwd=_create_work_dir(tmp_path))
+    original = path.read_text(encoding="utf-8")
+    panel_window_manager()
+
+    operator = panel.CLAUDE_OT_add_cwd(directory="")
+    result = operator.execute(bpy.context)
+
+    assert result == {"CANCELLED"}
+    assert path.read_text(encoding="utf-8") == original, "選ばれていないのに登録を触らない"
+    assert any("No directory" in message for _level, message in operator.reports), (
+        f"断った理由はユーザーへ出す: {operator.reports}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored", "status", "expected_enabled"), _SWITCH_DISABLING_CASES
+)
+def test_the_add_button_is_disabled_exactly_like_the_picker(
+    drawable_panel, stored, status, expected_enabled
+):
+    """C-4 は Add にも効く。切り替えである以上、接続中・送信中は選ばせない。"""
+    drawable_panel(status, **stored)
+
+    layout = _draw_panel()
+
+    assert _row_enabled(layout, _ADD_CWD_IDNAME) is expected_enabled
