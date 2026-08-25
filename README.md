@@ -4,6 +4,8 @@
 
 **Ask Claude Code — from inside Blender.** Your hands stay in the viewport — Claude sees your selection and helps from a side panel.
 
+https://github.com/user-attachments/assets/2a4f2206-3bb8-4d23-a5c4-10f0eb9f41c6
+
 claude-in-blender adds a small panel to Blender's N-panel and sends your requests to a fork of the Claude Code session you're already using. The connection runs in reverse: Claude does the work by driving Blender directly through the bundled MCP server — carrying over the context of your desktop conversation, without ever leaving Blender.
 
 Everything you need to add lives in this repository: a Blender add-on + a bundled MCP server. Plus the Claude Code you already have — that's the whole stack.
