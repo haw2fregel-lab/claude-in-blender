@@ -34,7 +34,7 @@ Blender の N パネルに小さな窓を開き、いま使っている Claude C
 
 - [Claude Code](https://claude.com/claude-code)（ログイン済み——サブスクリプションでも API アカウントでも。どちらで入っているかは事前に確認を）
 - Python 3.10+（MCP サーバー用）
-- Blender 4.2+（Extension 形式の対応下限。動作確認済みは 5.1.2 / Windows）
+- Blender 4.2+（Extension 形式の対応下限。動作確認済みは 5.1.2 / Windows + macOS）
 
 ## 使い始める
 

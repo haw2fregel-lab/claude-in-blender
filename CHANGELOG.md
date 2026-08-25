@@ -3,7 +3,7 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] — 2026-08-22
+## [1.0.0] — 2026-08-26
 
 First public release. Everything below shipped together; earlier `0.x` tags were
 development milestones and were never published.
@@ -47,7 +47,6 @@ development milestones and were never published.
 
 - Switching `.blend` files mid-request is reported, not blocked.
 - A request in flight cannot be cancelled.
-- Tested on Windows. macOS support is implemented but not yet verified on hardware;
-  Linux is untested.
+- Tested on Windows and macOS. Linux is untested.
 
 [1.0.0]: https://github.com/haw2fregel-lab/claude-in-blender/releases/tag/v1.0.0

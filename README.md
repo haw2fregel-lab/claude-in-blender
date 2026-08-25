@@ -34,7 +34,7 @@ Everything you need to add lives in this repository: a Blender add-on + a bundle
 
 - [Claude Code](https://claude.com/claude-code) (logged in — subscription or API account both work; check which one you're on before you start)
 - Python 3.10+ (for the MCP server)
-- Blender 4.2+ (the Extension format's minimum; tested on 5.1.2 / Windows)
+- Blender 4.2+ (the Extension format's minimum; tested on 5.1.2 / Windows + macOS)
 
 ## Get started
 
