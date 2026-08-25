@@ -4,6 +4,8 @@
 
 **Blender の中から Claude Code に頼める。**手はビューポートから離れない——選択中のものは Claude にも見えていて、横のパネルから手伝ってくれる。
 
+https://github.com/user-attachments/assets/5360f544-db83-4bfa-bd46-55fa784422f7
+
 Blender の N パネルに小さな窓を開き、いま使っている Claude Code セッションの**写し（fork）**に依頼を送る逆方向連携。頼んだ作業は、Claude が同梱の MCP サーバー経由で Blender を直接操作して実行します——デスクトップでの会話の文脈を引き継いで、Blender から出ずに。
 
 足すものはこのリポジトリで完結します：Blender アドオン + 同梱 MCP サーバー。あとは、すでに使っている Claude Code。それだけ。
